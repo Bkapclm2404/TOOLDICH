@@ -265,13 +265,20 @@ let maxZhLength = 1;
 
 // Hàm cập nhật cấu trúc tra cứu từ điển
 function rebuildSortedDictList() {
+  // Ưu tiên danh mục AI lên trước (1-6) để khi đè lên dictLookupMapBoth, bộ từ điển AI sẽ ghi đè bộ từ điển Gốc (11-15)
   const catPriority: Record<string, number> = {
-    Name: 1, AiName: 1,
-    Pronouns: 2, AiPronouns: 2,
-    LuatNhan: 3, AiLuatNhan: 3,
-    VietPhrase: 4, AiVietPhrase: 4,
-    PhienAm: 5, AiPhienAm: 5,
-    AiDict: 6
+    AiName: 1,
+    AiPronouns: 2,
+    AiLuatNhan: 3,
+    AiVietPhrase: 4,
+    AiPhienAm: 5,
+    AiDict: 6,
+
+    Name: 11,
+    Pronouns: 12,
+    LuatNhan: 13,
+    VietPhrase: 14,
+    PhienAm: 15,
   };
   
   dictLookupMapBoth.clear();
@@ -290,7 +297,7 @@ function rebuildSortedDictList() {
     const isStandard = STANDARD_CATEGORIES.includes(entry.cat);
     const isAi = AI_CATEGORIES.includes(entry.cat);
 
-    // 1. Cụm từ dịch cho chế độ Both
+    // 1. Cụm từ dịch cho chế độ Both (AI có prio nhỏ hơn nên sẽ đè lên Standard)
     const existingBoth = dictLookupMapBoth.get(entry.zh);
     if (!existingBoth || prio < existingBoth.catPriority) {
       dictLookupMapBoth.set(entry.zh, { vi: entry.vi, catPriority: prio });
@@ -316,7 +323,10 @@ function rebuildSortedDictList() {
     if (entry.cat === 'PhienAm' || entry.cat === 'AiPhienAm') {
       if (entry.zh.length === 1) {
         const cleanVi = cleanViChoice(entry.vi);
-        phienAmMapBoth.set(entry.zh, cleanVi);
+        const existingPhienAmBoth = phienAmMapBoth.get(entry.zh);
+        if (!existingPhienAmBoth || entry.cat === 'AiPhienAm') {
+          phienAmMapBoth.set(entry.zh, cleanVi);
+        }
         if (entry.cat === 'PhienAm') phienAmMapStandard.set(entry.zh, cleanVi);
         if (entry.cat === 'AiPhienAm') phienAmMapAi.set(entry.zh, cleanVi);
       }
@@ -531,17 +541,6 @@ function translateSegment(
   const len = text.length;
   const resultTokens: string[] = [];
 
-  let lookupMap = dictLookupMapBoth;
-  let phienAmMap = phienAmMapBoth;
-
-  if (dictMode === 'standard') {
-    lookupMap = dictLookupMapStandard;
-    phienAmMap = phienAmMapStandard;
-  } else if (dictMode === 'ai') {
-    lookupMap = dictLookupMapAi;
-    phienAmMap = phienAmMapAi;
-  }
-
   const effectiveMaxLen = Math.min(maxZhLength, maxPhraseLength > 0 ? maxPhraseLength : 16);
 
   while (i < len) {
@@ -561,7 +560,24 @@ function translateSegment(
 
     for (let subLen = maxLookahead; subLen >= 1; subLen--) {
       const sub = text.substring(i, i + subLen);
-      const entry = lookupMap.get(sub);
+      
+      let entry: { vi: string; catPriority: number } | undefined = undefined;
+
+      if (dictMode === 'ai') {
+        // Ưu tiên cao nhất: Tra cứu trong Từ Điển AI trước
+        entry = dictLookupMapAi.get(sub);
+        // Nếu không có trong TĐ AI, bổ sung tra từ TĐ Standard (Gốc)
+        if (!entry) {
+          entry = dictLookupMapStandard.get(sub);
+        }
+      } else if (dictMode === 'standard') {
+        // Chỉ tra trong Từ Điển Gốc (Bỏ qua từ điển AI)
+        entry = dictLookupMapStandard.get(sub);
+      } else {
+        // Chế độ 'both': Tra cứu cả 2 bộ (Trong đó AI đã được ưu tiên ghi đè Gốc)
+        entry = dictLookupMapBoth.get(sub);
+      }
+
       if (entry) {
         const cleanVi = cleanViChoice(entry.vi);
         resultTokens.push(cleanVi);
@@ -573,8 +589,18 @@ function translateSegment(
 
     if (!matched) {
       // Dịch đơn tự Hán Việt nếu không khớp từ phức
-      if (phienAmMap.has(char)) {
-        resultTokens.push(phienAmMap.get(char)!);
+      let phienAm: string | undefined = undefined;
+
+      if (dictMode === 'ai') {
+        phienAm = phienAmMapAi.get(char) || phienAmMapStandard.get(char) || phienAmMapBoth.get(char);
+      } else if (dictMode === 'standard') {
+        phienAm = phienAmMapStandard.get(char);
+      } else {
+        phienAm = phienAmMapBoth.get(char);
+      }
+
+      if (phienAm) {
+        resultTokens.push(phienAm);
       } else {
         resultTokens.push(char);
       }
