@@ -27,6 +27,7 @@ export default function App() {
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadCategory, setUploadCategory] = useState<string>('VietPhrase');
+  const [appVersion, setAppVersion] = useState<number>(0.1);
 
   const [sourceText, setSourceText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
@@ -35,7 +36,7 @@ export default function App() {
   const [translationEngine, setTranslationEngine] = useState<'gemini' | 'vietphrase'>('gemini');
   const [segmentationMode, setSegmentationMode] = useState<'paragraph' | 'sentence'>('paragraph');
   const [maxPhraseLength, setMaxPhraseLength] = useState<number>(16);
-  const [dictMode, setDictMode] = useState<'both' | 'standard' | 'ai'>('both');
+  const [dictMode, setDictMode] = useState<'standard' | 'ai'>('standard');
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const isPausedRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -148,6 +149,7 @@ export default function App() {
         if (data.activeAiModel) setActiveAiModel(data.activeAiModel);
         if (typeof data.hasAiApiKey === 'boolean') setHasAiApiKey(data.hasAiApiKey);
         if (typeof data.aiProxyUrl === 'string') setAiProxyUrl(data.aiProxyUrl);
+        if (typeof data.appVersion === 'number') setAppVersion(data.appVersion);
         setServerStatus('connected');
       } else {
         setServerStatus('disconnected');
@@ -202,6 +204,7 @@ export default function App() {
         setActiveAiModel(data.activeModel);
         setHasAiApiKey(data.hasApiKey);
         setAiProxyUrl(data.proxyUrl);
+        if (typeof data.appVersion === 'number') setAppVersion(data.appVersion);
         setAiConfigMessage("Đã lưu cấu hình AI máy chủ thành công!");
         fetchStats();
       } else {
@@ -407,6 +410,8 @@ export default function App() {
       });
 
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (typeof data.appVersion === 'number') setAppVersion(data.appVersion);
         alert(`Đã lưu thành công ${selectedEntries.length} từ vựng vào các tệp bộ từ điển tương ứng!`);
         setIsExtractModalOpen(false);
         fetchStats();
@@ -474,6 +479,8 @@ export default function App() {
         body: JSON.stringify({ category, group }),
       });
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (typeof data.appVersion === 'number') setAppVersion(data.appVersion);
         fetchStats();
         setSearchResults([]);
       }
@@ -490,7 +497,7 @@ export default function App() {
     for (const file of (Array.from(files) as File[])) {
       try {
         const textContent = await file.text();
-        await fetchWithFallback('/api/dictionary/upload-txt', {
+        const resUpload = await fetchWithFallback('/api/dictionary/upload-txt', {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
@@ -498,6 +505,10 @@ export default function App() {
           },
           body: JSON.stringify({ category: uploadCategory, textContent, overwrite: false }),
         });
+        if (resUpload.ok) {
+          const dataUpload = await resUpload.json().catch(() => ({}));
+          if (typeof dataUpload.appVersion === 'number') setAppVersion(dataUpload.appVersion);
+        }
       } catch (err) {
         console.error(err);
       }
@@ -548,7 +559,7 @@ export default function App() {
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-bold text-white tracking-tight">VietPhrase Web</h1>
               <span className="px-2 py-0.5 text-[10px] font-extrabold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono shadow-sm">
-                v0.1 beta
+                v{appVersion.toFixed(1)} beta
               </span>
             </div>
             <p className="text-xs text-slate-500 font-medium">VietPhrase & Gemini AI Translator System</p>
@@ -986,17 +997,6 @@ export default function App() {
                       Bộ TĐ khi dịch từ điển:
                     </span>
                     <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800">
-                      <button
-                        onClick={() => setDictMode('both')}
-                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all flex items-center gap-1 ${
-                          dictMode === 'both'
-                            ? 'bg-slate-800 text-amber-300 font-bold border border-slate-700 shadow-sm'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                        title="Dùng kết hợp cả Bộ Từ Điển Gốc và Bộ Từ Điển AI"
-                      >
-                        Cả 2 bộ (Gốc + AI)
-                      </button>
                       <button
                         onClick={() => setDictMode('standard')}
                         className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all flex items-center gap-1 ${

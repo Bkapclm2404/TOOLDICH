@@ -11,6 +11,11 @@ let currentAiModel = "gemini-flash-latest";
 let customApiKey = "";
 let aiProxyUrl = "";
 let aiProviderType = "gemini"; // 'gemini' | 'openai'
+let appVersion = 0.1;
+
+function incrementVersion() {
+  appVersion = Number((appVersion + 0.1).toFixed(1));
+}
 
 // Hàm gọi AI linh hoạt hỗ trợ Google AI, Proxy trung gian & OpenAI/OpenRouter (Không bắt buộc Key Google AI trực tiếp)
 async function callAiModel(systemInstruction: string, userPrompt: string): Promise<string> {
@@ -114,7 +119,7 @@ async function callAiModel(systemInstruction: string, userPrompt: string): Promi
 }
 
 // Hàm tạo ngữ cảnh glossary từ điển cho AI Gemini khi dịch
-function getGlossaryForText(text: string, dictMode: 'both' | 'standard' | 'ai' = 'both'): string {
+function getGlossaryForText(text: string, dictMode: 'standard' | 'ai' = 'standard'): string {
   if (!text || serverDictionary.size === 0) return '';
 
   const matchedAi: ServerDictEntry[] = [];
@@ -137,11 +142,8 @@ function getGlossaryForText(text: string, dictMode: 'both' | 'standard' | 'ai' =
   let selectedEntries: ServerDictEntry[] = [];
   if (dictMode === 'ai') {
     selectedEntries = matchedAi;
-  } else if (dictMode === 'standard') {
-    selectedEntries = matchedStd;
   } else {
-    // Both: Ưu tiên bộ từ điển AI trước, sau đó bổ sung bộ từ điển Gốc
-    selectedEntries = [...matchedAi, ...matchedStd];
+    selectedEntries = matchedStd;
   }
 
   if (selectedEntries.length === 0) return '';
@@ -156,7 +158,7 @@ Yêu cầu bắt buộc: Dịch chính xác theo các từ vựng, tên riêng, 
 }
 
 // Hàm dịch văn bản mượt mà bằng Gemini AI / Proxy AI
-async function translateWithGemini(text: string, dictMode: 'both' | 'standard' | 'ai' = 'both'): Promise<string> {
+async function translateWithGemini(text: string, dictMode: 'standard' | 'ai' = 'standard'): Promise<string> {
   const glossaryInstruction = getGlossaryForText(text, dictMode);
 
   const systemInstruction = `Bạn là dịch giả chuyên nghiệp xuất sắc dịch thuật truyện, tiểu thuyết, truyện cười và thoại game từ tiếng Trung sang tiếng Việt.
@@ -251,13 +253,11 @@ if (!fs.existsSync(DICT_DIR)) {
   fs.mkdirSync(DICT_DIR, { recursive: true });
 }
 
-// Mảng được sắp xếp và Map tra cứu nhanh riêng biệt cho từng chế độ dịch (Standard, AI, Both)
+// Mảng được sắp xếp và Map tra cứu nhanh riêng biệt cho từng chế độ dịch (Standard, AI)
 let sortedDictList: ServerDictEntry[] = [];
-let dictLookupMapBoth = new Map<string, { vi: string; catPriority: number }>();
 let dictLookupMapStandard = new Map<string, { vi: string; catPriority: number }>();
 let dictLookupMapAi = new Map<string, { vi: string; catPriority: number }>();
 
-let phienAmMapBoth = new Map<string, string>();
 let phienAmMapStandard = new Map<string, string>();
 let phienAmMapAi = new Map<string, string>();
 
@@ -265,7 +265,6 @@ let maxZhLength = 1;
 
 // Hàm cập nhật cấu trúc tra cứu từ điển
 function rebuildSortedDictList() {
-  // Ưu tiên danh mục AI lên trước (1-6) để khi đè lên dictLookupMapBoth, bộ từ điển AI sẽ ghi đè bộ từ điển Gốc (11-15)
   const catPriority: Record<string, number> = {
     AiName: 1,
     AiPronouns: 2,
@@ -281,11 +280,9 @@ function rebuildSortedDictList() {
     PhienAm: 15,
   };
   
-  dictLookupMapBoth.clear();
   dictLookupMapStandard.clear();
   dictLookupMapAi.clear();
 
-  phienAmMapBoth.clear();
   phienAmMapStandard.clear();
   phienAmMapAi.clear();
 
@@ -297,13 +294,7 @@ function rebuildSortedDictList() {
     const isStandard = STANDARD_CATEGORIES.includes(entry.cat);
     const isAi = AI_CATEGORIES.includes(entry.cat);
 
-    // 1. Cụm từ dịch cho chế độ Both (AI có prio nhỏ hơn nên sẽ đè lên Standard)
-    const existingBoth = dictLookupMapBoth.get(entry.zh);
-    if (!existingBoth || prio < existingBoth.catPriority) {
-      dictLookupMapBoth.set(entry.zh, { vi: entry.vi, catPriority: prio });
-    }
-
-    // 2. Cụm từ dịch cho chế độ Standard (Chỉ từ điển gốc)
+    // 1. Cụm từ dịch cho chế độ Standard (Chỉ từ điển gốc)
     if (isStandard) {
       const existingStandard = dictLookupMapStandard.get(entry.zh);
       if (!existingStandard || prio < existingStandard.catPriority) {
@@ -311,7 +302,7 @@ function rebuildSortedDictList() {
       }
     }
 
-    // 3. Cụm từ dịch cho chế độ AI (Chỉ từ điển AI)
+    // 2. Cụm từ dịch cho chế độ AI (Chỉ từ điển AI)
     if (isAi) {
       const existingAi = dictLookupMapAi.get(entry.zh);
       if (!existingAi || prio < existingAi.catPriority) {
@@ -323,10 +314,6 @@ function rebuildSortedDictList() {
     if (entry.cat === 'PhienAm' || entry.cat === 'AiPhienAm') {
       if (entry.zh.length === 1) {
         const cleanVi = cleanViChoice(entry.vi);
-        const existingPhienAmBoth = phienAmMapBoth.get(entry.zh);
-        if (!existingPhienAmBoth || entry.cat === 'AiPhienAm') {
-          phienAmMapBoth.set(entry.zh, cleanVi);
-        }
         if (entry.cat === 'PhienAm') phienAmMapStandard.set(entry.zh, cleanVi);
         if (entry.cat === 'AiPhienAm') phienAmMapAi.set(entry.zh, cleanVi);
       }
@@ -535,7 +522,7 @@ function formatTranslatedTokens(tokens: string[]): string {
 function translateSegment(
   text: string, 
   maxPhraseLength: number = 16,
-  dictMode: 'both' | 'standard' | 'ai' = 'both'
+  dictMode: 'standard' | 'ai' = 'standard'
 ): string {
   let i = 0;
   const len = text.length;
@@ -564,18 +551,11 @@ function translateSegment(
       let entry: { vi: string; catPriority: number } | undefined = undefined;
 
       if (dictMode === 'ai') {
-        // Ưu tiên cao nhất: Tra cứu trong Từ Điển AI trước
+        // Chỉ tra cứu trong Từ Điển AI, tuyệt đối không dùng từ điển Gốc
         entry = dictLookupMapAi.get(sub);
-        // Nếu không có trong TĐ AI, bổ sung tra từ TĐ Standard (Gốc)
-        if (!entry) {
-          entry = dictLookupMapStandard.get(sub);
-        }
-      } else if (dictMode === 'standard') {
-        // Chỉ tra trong Từ Điển Gốc (Bỏ qua từ điển AI)
-        entry = dictLookupMapStandard.get(sub);
       } else {
-        // Chế độ 'both': Tra cứu cả 2 bộ (Trong đó AI đã được ưu tiên ghi đè Gốc)
-        entry = dictLookupMapBoth.get(sub);
+        // Chỉ tra cứu trong Từ Điển Gốc, tuyệt đối không dùng từ điển AI
+        entry = dictLookupMapStandard.get(sub);
       }
 
       if (entry) {
@@ -592,11 +572,9 @@ function translateSegment(
       let phienAm: string | undefined = undefined;
 
       if (dictMode === 'ai') {
-        phienAm = phienAmMapAi.get(char) || phienAmMapStandard.get(char) || phienAmMapBoth.get(char);
-      } else if (dictMode === 'standard') {
-        phienAm = phienAmMapStandard.get(char);
+        phienAm = phienAmMapAi.get(char);
       } else {
-        phienAm = phienAmMapBoth.get(char);
+        phienAm = phienAmMapStandard.get(char);
       }
 
       if (phienAm) {
@@ -614,13 +592,13 @@ function translateSegment(
 // Hàm dịch văn bản bằng từ điển máy chủ (Bảo vệ thẻ XML/HTML & biến)
 function translateTextServer(
   text: string, 
-  options: { maxPhraseLength?: number; translateKeywords?: boolean; dictMode?: 'both' | 'standard' | 'ai' } = {}
+  options: { maxPhraseLength?: number; translateKeywords?: boolean; dictMode?: 'standard' | 'ai' } = {}
 ): string {
   if (!text || typeof text !== 'string') return text;
   if (serverDictionary.size === 0) return text;
 
   const maxPhraseLength = options.maxPhraseLength || 16;
-  const dictMode = options.dictMode || 'both';
+  const dictMode = options.dictMode || 'standard';
 
   // Tách văn bản thành thẻ bảo vệ (<tag>, {{var}}) và văn bản thường
   const tagRegex = /(<[^>]+>|\{\{[^}]+\}\})/g;
@@ -648,7 +626,7 @@ function translateTextServer(
 }
 
 // Dịch mảng chuỗi (keys, keysecondary)
-function translateArrayServer(arr: any[], options: { maxPhraseLength?: number; dictMode?: 'both' | 'standard' | 'ai' } = {}): any[] {
+function translateArrayServer(arr: any[], options: { maxPhraseLength?: number; dictMode?: 'standard' | 'ai' } = {}): any[] {
   if (!Array.isArray(arr)) return arr;
   return arr.map((item) => {
     if (typeof item === 'string') {
@@ -715,13 +693,16 @@ async function startServer() {
         aiProxyUrl = proxyUrl.trim();
       }
 
+      incrementVersion();
+
       res.json({
         success: true,
         message: "Cập nhật cấu hình AI máy chủ thành công!",
         activeModel: currentAiModel,
         providerType: aiProviderType,
         hasApiKey: !!(customApiKey.trim() || process.env.GEMINI_API_KEY),
-        proxyUrl: aiProxyUrl
+        proxyUrl: aiProxyUrl,
+        appVersion
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -769,6 +750,7 @@ async function startServer() {
       activeAiModel: currentAiModel,
       hasAiApiKey: !!(customApiKey.trim() || process.env.GEMINI_API_KEY),
       aiProxyUrl: aiProxyUrl,
+      appVersion,
     });
   });
 
@@ -803,7 +785,7 @@ async function startServer() {
       }
 
       const parsedMaxLen = typeof maxPhraseLength === 'number' && maxPhraseLength > 0 ? maxPhraseLength : 16;
-      const parsedDictMode = (dictMode === 'standard' || dictMode === 'ai') ? dictMode : 'both';
+      const parsedDictMode = (dictMode === 'ai') ? 'ai' : 'standard';
 
       if (engine === 'gemini') {
         try {
@@ -884,11 +866,13 @@ async function startServer() {
 
       rebuildSortedDictList();
       affectedCats.forEach((c) => saveCategoryToDisk(c));
+      incrementVersion();
 
       res.json({
         success: true,
         message: `Đã lưu thành công ${countAdded} từ vựng mới vào bộ từ điển máy chủ`,
         totalDictSize: serverDictionary.size,
+        appVersion,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -927,11 +911,13 @@ async function startServer() {
 
       rebuildSortedDictList();
       saveCategoryToDisk(cat);
+      incrementVersion();
 
       res.json({
         success: true,
         message: `Đã nạp ${countAdded} mục từ vào kho máy chủ [${cat}]`,
         totalDictSize: serverDictionary.size,
+        appVersion,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -964,7 +950,8 @@ async function startServer() {
       }
     }
     rebuildSortedDictList();
-    res.json({ success: true, message: 'Đã dọn dẹp kho từ điển máy chủ', totalDictSize: serverDictionary.size });
+    incrementVersion();
+    res.json({ success: true, message: 'Đã dọn dẹp kho từ điển máy chủ', totalDictSize: serverDictionary.size, appVersion });
   });
 
   // Endpoint xuất/tải tệp TXT từ điển
