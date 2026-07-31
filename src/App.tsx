@@ -4,7 +4,7 @@ import { Server, Settings, Terminal, RefreshCw, Upload, Check, Copy, Link as Lin
 export default function App() {
   // --- STATE ---
   const [apiBaseUrl, setApiBaseUrl] = useState<string>('https://muster-okay-unpaired.ngrok-free.dev');
-  const [useExternalApi, setUseExternalApi] = useState<boolean>(false);
+  const [useExternalApi, setUseExternalApi] = useState<boolean>(true);
   const [isConfiguringApi, setIsConfiguringApi] = useState(false);
   const [isGitModalOpen, setIsGitModalOpen] = useState(false);
   const [isGitPulling, setIsGitPulling] = useState(false);
@@ -27,7 +27,7 @@ export default function App() {
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadCategory, setUploadCategory] = useState<string>('VietPhrase');
-  const [appVersion, setAppVersion] = useState<number>(0.1);
+  const [appVersion, setAppVersion] = useState<number>(0.2);
 
   const [sourceText, setSourceText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
@@ -385,6 +385,53 @@ export default function App() {
     }
   };
 
+  const handleStartExtractFast = async () => {
+    if (!sourceText.trim()) {
+      alert("Vui lòng nhập văn bản gốc tiếng Trung.");
+      return;
+    }
+    setIsExtractModalOpen(true);
+    setIsExtracting(true);
+    setExtractStatus("Đang trích xuất nhanh bằng thuật toán từ điển (tức thì)...");
+    setExtractedPairs([]);
+
+    try {
+      const res = await fetchWithFallback('/api/dictionary/extract-fast', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
+        body: JSON.stringify({
+          sourceText,
+        }),
+      }, true);
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.pairs && Array.isArray(data.pairs) && data.pairs.length > 0) {
+          setExtractedPairs(data.pairs.map((p: any) => ({
+            zh: p.zh,
+            vi: p.vi,
+            cat: p.cat || extractedCategory || 'AiDict',
+            checked: true
+          })));
+          setExtractStatus(`Đã trích xuất nhanh ${data.pairs.length} từ vựng từ bộ từ điển máy chủ!`);
+        } else {
+          setExtractStatus("Không tìm thấy cụm từ nào khớp với từ điển trong đoạn văn bản này.");
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setExtractStatus(`Lỗi trích xuất nhanh: ${errData.error || res.statusText}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setExtractStatus("Lỗi kết nối máy chủ khi trích xuất nhanh.");
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
   const handleSaveExtractedPairs = async () => {
     const selectedEntries = extractedPairs
       .filter(p => p.checked && p.zh.trim() && p.vi.trim())
@@ -406,6 +453,7 @@ export default function App() {
         body: JSON.stringify({
           category: extractedCategory,
           entries: selectedEntries,
+          forceAiPrefix: true,
         }),
       });
 
@@ -857,7 +905,7 @@ export default function App() {
               Dịch thuật
             </button>
             <button
-              onClick={() => setActiveTab('dictionary')}
+              onClick={() => { setActiveTab('dictionary'); fetchStats(); }}
               className={`py-4 text-sm font-semibold border-b-2 transition-colors ${
                 activeTab === 'dictionary' 
                   ? 'border-emerald-500 text-emerald-400' 
@@ -1224,6 +1272,17 @@ export default function App() {
                             title="Tự động trích xuất các tên riêng và cụm từ mới từ bản dịch AI vào bộ từ điển"
                           >
                             <Plus size={16} /> 📖 Trích xuất Từ điển từ AI
+                          </button>
+                        )}
+
+                        {/* Nút Trích xuất nhanh bằng thuật toán (Tức thì) */}
+                        {sourceText.trim() && (
+                          <button
+                            onClick={handleStartExtractFast}
+                            className="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-purple-950/30 transition-all flex items-center gap-2 transform active:scale-[0.98]"
+                            title="Trích xuất nhanh tức thì từ văn bản gốc bằng thuật toán từ điển (Không dùng AI, không chờ đợi)"
+                          >
+                            <Zap size={16} /> ⚡ Trích xuất nhanh (Tức thì)
                           </button>
                         )}
                       </>
