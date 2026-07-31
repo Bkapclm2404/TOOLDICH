@@ -69,13 +69,32 @@ export default function App() {
   // Dictionary Group Filter
   const [dictGroupFilter, setDictGroupFilter] = useState<'all' | 'standard' | 'ai'>('all');
 
-  // --- API HELPER ---
-  const getEndpoint = (path: string) => {
-    if (useExternalApi && apiBaseUrl.trim()) {
+  // --- API HELPER WITH AUTOMATIC FALLBACK ---
+  const getEndpoint = (path: string, forceInternal = false) => {
+    if (!forceInternal && useExternalApi && apiBaseUrl.trim()) {
       const base = apiBaseUrl.trim().replace(/\/$/, '');
       return `${base}${path}`;
     }
     return path;
+  };
+
+  const fetchWithFallback = async (path: string, options?: RequestInit): Promise<Response> => {
+    // Nếu bật API kết nối ngoài, thử gọi máy chủ ngoài trước
+    if (useExternalApi && apiBaseUrl.trim()) {
+      const extUrl = getEndpoint(path, false);
+      try {
+        const res = await fetch(extUrl, options);
+        if (res.ok) {
+          return res;
+        }
+        console.warn(`Máy chủ ngoài trả về mã ${res.status} cho API [${path}]. Tự động chuyển sang gọi Máy chủ AI/Nội bộ...`);
+      } catch (err) {
+        console.warn(`Lỗi mạng khi kết nối máy chủ ngoài cho API [${path}]. Tự động chuyển sang Máy chủ AI/Nội bộ...`, err);
+      }
+    }
+    // Tự động dùng máy chủ nội bộ nếu máy chủ ngoài bị lỗi hoặc không có
+    const intUrl = getEndpoint(path, true);
+    return await fetch(intUrl, options);
   };
 
   // --- EFFECTS ---
@@ -111,7 +130,7 @@ export default function App() {
     setIsLoadingStats(true);
     setServerStatus('checking');
     try {
-      const res = await fetch(getEndpoint('/api/dictionary/stats'), {
+      const res = await fetchWithFallback('/api/dictionary/stats', {
         headers: {
           'ngrok-skip-browser-warning': 'true'
         }
@@ -141,7 +160,7 @@ export default function App() {
 
   const fetchAiConfig = async () => {
     try {
-      const res = await fetch(getEndpoint('/api/ai/config'), {
+      const res = await fetchWithFallback('/api/ai/config', {
         headers: { 'ngrok-skip-browser-warning': 'true' }
       });
       if (res.ok) {
@@ -161,7 +180,7 @@ export default function App() {
     setIsSavingAiConfig(true);
     setAiConfigMessage(null);
     try {
-      const res = await fetch(getEndpoint('/api/ai/config'), {
+      const res = await fetchWithFallback('/api/ai/config', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -258,7 +277,7 @@ export default function App() {
           continue;
         }
 
-        const res = await fetch(getEndpoint('/api/translate-text'), {
+        const res = await fetchWithFallback('/api/translate-text', {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
@@ -320,7 +339,7 @@ export default function App() {
     setExtractedPairs([]);
 
     try {
-      const res = await fetch(getEndpoint('/api/dictionary/extract-from-ai'), {
+      const res = await fetchWithFallback('/api/dictionary/extract-from-ai', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -364,7 +383,7 @@ export default function App() {
 
     try {
       setExtractStatus("Đang lưu các từ vựng vào bộ từ điển máy chủ...");
-      const res = await fetch(getEndpoint('/api/dictionary/add-entries'), {
+      const res = await fetchWithFallback('/api/dictionary/add-entries', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -380,7 +399,7 @@ export default function App() {
         const data = await res.json();
         alert(`Đã lưu thành công ${selectedEntries.length} từ vựng vào danh mục [${extractedCategory}]!`);
         setIsExtractModalOpen(false);
-        fetchStats();
+ fetchStats();
       } else {
         const err = await res.json().catch(() => ({}));
         alert(`Lỗi lưu từ điển: ${err.error || res.statusText}`);
@@ -409,12 +428,11 @@ export default function App() {
   const handleSearchEntries = async () => {
     setIsSearching(true);
     try {
-      const url = new URL(getEndpoint('/api/dictionary/entries'), window.location.origin);
-      if (searchCategory) url.searchParams.append('category', searchCategory);
-      if (searchQuery) url.searchParams.append('search', searchQuery);
-      url.searchParams.append('limit', '50');
+      let path = `/api/dictionary/entries?limit=50`;
+      if (searchCategory) path += `&category=${encodeURIComponent(searchCategory)}`;
+      if (searchQuery) path += `&search=${encodeURIComponent(searchQuery)}`;
 
-      const res = await fetch(url.toString(), {
+      const res = await fetchWithFallback(path, {
         headers: { 'ngrok-skip-browser-warning': 'true' }
       });
       if (res.ok) {
@@ -436,7 +454,7 @@ export default function App() {
   const handleClearCategory = async (category: string, catName: string) => {
     if (!confirm(`Bạn có chắc chắn muốn xóa toàn bộ dữ liệu từ điển [${catName}] trên máy chủ?`)) return;
     try {
-      const res = await fetch(getEndpoint('/api/dictionary/clear'), {
+      const res = await fetchWithFallback('/api/dictionary/clear', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -461,7 +479,7 @@ export default function App() {
     for (const file of (Array.from(files) as File[])) {
       try {
         const textContent = await file.text();
-        await fetch(getEndpoint('/api/dictionary/upload-txt'), {
+        await fetchWithFallback('/api/dictionary/upload-txt', {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
@@ -484,7 +502,7 @@ export default function App() {
     setIsGitPulling(true);
     setGitPullResult(null);
     try {
-      const res = await fetch(getEndpoint('/api/git/pull'), {
+      const res = await fetchWithFallback('/api/git/pull', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -516,8 +534,13 @@ export default function App() {
             <BookOpen className="text-emerald-400" size={20} />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-white tracking-tight">VietPhrase Web</h1>
-            <p className="text-xs text-slate-500 font-medium">Professional Translation Interface</p>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-bold text-white tracking-tight">VietPhrase Web</h1>
+              <span className="px-2 py-0.5 text-[10px] font-extrabold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono shadow-sm">
+                v0.1 beta
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 font-medium">VietPhrase & Gemini AI Translator System</p>
           </div>
         </div>
         
@@ -1578,6 +1601,20 @@ export default function App() {
           </div>
         </div>
       )}
+      {/* Footer */}
+      <footer className="bg-slate-950 border-t border-slate-800/80 px-6 py-2.5 text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-2 z-10 shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-slate-400">VietPhrase & Gemini AI Translator</span>
+          <span className="text-[10px] bg-slate-900 text-amber-400 px-2 py-0.5 rounded font-mono font-bold border border-slate-800">Phiên bản 0.1 beta</span>
+        </div>
+        <div className="flex items-center gap-4 text-[11px] text-slate-500">
+          <span>Tự động trích xuất từ điển AI</span>
+          <span>•</span>
+          <span>Dịch mượt Gemini</span>
+          <span>•</span>
+          <span>Hỗ trợ API Ngrok & Máy chủ nội bộ</span>
+        </div>
+      </footer>
     </div>
   );
 }
