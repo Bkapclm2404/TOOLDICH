@@ -415,6 +415,13 @@ function loadDictionariesFromDisk() {
   for (const cat of ALL_CATEGORIES) {
     const fileName = getDictFileName(cat);
     const filePath = path.join(DICT_DIR, fileName);
+    if (!fs.existsSync(filePath)) {
+      try {
+        fs.writeFileSync(filePath, `# Bộ từ điển ${cat} trên máy chủ\n`, 'utf-8');
+      } catch (err) {
+        console.error(`Không thể tạo tệp từ điển ${fileName}:`, err);
+      }
+    }
     if (fs.existsSync(filePath)) {
       try {
         const content = fs.readFileSync(filePath, "utf-8");
