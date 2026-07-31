@@ -1,0 +1,8 @@
+{
+  "name": "TOOLDICH",
+  "description": "A tool to translate Chinese game/story configuration files to Vietnamese while preserving structural integrity.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
