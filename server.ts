@@ -10,56 +10,168 @@ import { GoogleGenAI } from "@google/genai";
 let currentAiModel = "gemini-flash-latest";
 let customApiKey = "";
 let aiProxyUrl = "";
+let aiProviderType = "gemini"; // 'gemini' | 'openai'
 
-// Khởi tạo Gemini AI Client
-function getAiClient(): GoogleGenAI | null {
-  const apiKey = customApiKey.trim() || process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return null;
+// Hàm gọi AI linh hoạt hỗ trợ Google AI, Proxy trung gian & OpenAI/OpenRouter (Không bắt buộc Key Google AI trực tiếp)
+async function callAiModel(systemInstruction: string, userPrompt: string): Promise<string> {
+  const apiKey = customApiKey.trim() || process.env.GEMINI_API_KEY || "";
+  const proxyUrl = aiProxyUrl.trim();
+  const modelToUse = currentAiModel.trim() || "gemini-flash-latest";
+  const provider = aiProviderType || "gemini";
+
+  // 1. Dạng OpenAI / OpenRouter / Custom ChatCompletions Proxy (/v1/chat/completions)
+  if (provider === "openai" || proxyUrl.includes("/v1") || proxyUrl.includes("openrouter") || proxyUrl.includes("openai")) {
+    let baseUrl = proxyUrl ? proxyUrl.replace(/\/chat\/completions\/?$/, '').replace(/\/+$/, '') : "https://api.openai.com/v1";
+    const endpoint = baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl}/chat/completions`;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
+    }
+
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: modelToUse,
+        messages: [
+          ...(systemInstruction ? [{ role: "system", content: systemInstruction }] : []),
+          { role: "user", content: userPrompt }
+        ],
+        temperature: 0.3,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Lỗi kết nối AI Proxy (${res.status}): ${errText || res.statusText}`);
+    }
+
+    const data = await res.json();
+    const resultText = data?.choices?.[0]?.message?.content || "";
+    return typeof resultText === 'string' ? resultText.trim() : "";
   }
 
-  const config: any = { apiKey };
-  if (aiProxyUrl.trim()) {
-    config.httpOptions = { baseUrl: aiProxyUrl.trim() };
+  // 2. Dạng Google Gemini API hoặc Gemini Proxy trung gian
+  if (!apiKey && !proxyUrl) {
+    throw new Error("Chưa có API Key hoặc Proxy AI. Vui lòng chọn kết nối Proxy/OpenRouter hoặc nhập Key/Token trong Cấu Hình AI.");
   }
 
-  return new GoogleGenAI(config);
+  const config: any = { apiKey: apiKey || "dummy_key_for_proxy" };
+  if (proxyUrl) {
+    config.httpOptions = { baseUrl: proxyUrl };
+  }
+
+  const ai = new GoogleGenAI(config);
+
+  const candidateModels = Array.from(new Set([
+    modelToUse,
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash",
+  ])).filter(Boolean);
+
+  let lastError: any = null;
+
+  for (const modelCandidate of candidateModels) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelCandidate,
+          contents: userPrompt,
+          config: systemInstruction ? { systemInstruction } : undefined,
+        });
+
+        if (response.text) {
+          return response.text.trim();
+        }
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = err?.message || String(err);
+        const isQuotaOrBusy = errMsg.includes("429") || errMsg.includes("503") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("UNAVAILABLE") || errMsg.includes("quota");
+        
+        if (isQuotaOrBusy && attempt === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          continue;
+        } else if (isQuotaOrBusy) {
+          break;
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+
+  const lastMsg = lastError?.message || String(lastError || "Lỗi gọi AI");
+  if (lastMsg.includes("429") || lastMsg.includes("RESOURCE_EXHAUSTED") || lastMsg.includes("quota")) {
+    throw new Error("Tài khoản Google Gemini API tạm hết Quota lượt gọi (Lỗi 429 Rate Limit). Vui lòng chờ vài giây hoặc nhập API Key / Proxy AI riêng trong Cấu Hình AI.");
+  } else if (lastMsg.includes("503") || lastMsg.includes("UNAVAILABLE")) {
+    throw new Error("Máy chủ Google Gemini AI đang quá tải (Lỗi 503). Tự động chuyển sang Dịch Từ Điển VietPhrase.");
+  }
+  throw lastError || new Error("Không nhận được phản hồi từ AI Gemini.");
 }
 
-// Hàm dịch văn bản mượt mà bằng Gemini AI
-async function translateWithGemini(text: string): Promise<string> {
-  const ai = getAiClient();
-  if (!ai) {
-    throw new Error("Chưa có API Key cho Gemini AI. Vui lòng thiết lập API Key hoặc Proxy trong Cài đặt AI.");
+// Hàm tạo ngữ cảnh glossary từ điển cho AI Gemini khi dịch
+function getGlossaryForText(text: string, dictMode: 'both' | 'standard' | 'ai' = 'both'): string {
+  if (!text || serverDictionary.size === 0) return '';
+
+  const matchedAi: ServerDictEntry[] = [];
+  const matchedStd: ServerDictEntry[] = [];
+
+  serverDictionary.forEach((entry) => {
+    if (text.includes(entry.zh)) {
+      if (AI_CATEGORIES.includes(entry.cat)) {
+        matchedAi.push(entry);
+      } else if (STANDARD_CATEGORIES.includes(entry.cat)) {
+        matchedStd.push(entry);
+      }
+    }
+  });
+
+  // Ưu tiên xếp từ dài hơn lên trước để AI không bị dịch lộn xộn
+  matchedAi.sort((a, b) => b.zh.length - a.zh.length);
+  matchedStd.sort((a, b) => b.zh.length - a.zh.length);
+
+  let selectedEntries: ServerDictEntry[] = [];
+  if (dictMode === 'ai') {
+    selectedEntries = matchedAi;
+  } else if (dictMode === 'standard') {
+    selectedEntries = matchedStd;
+  } else {
+    // Both: Ưu tiên bộ từ điển AI trước, sau đó bổ sung bộ từ điển Gốc
+    selectedEntries = [...matchedAi, ...matchedStd];
   }
 
-  const modelToUse = currentAiModel || "gemini-flash-latest";
+  if (selectedEntries.length === 0) return '';
 
-  const response = await ai.models.generateContent({
-    model: modelToUse,
-    contents: text,
-    config: {
-      systemInstruction: `Bạn là dịch giả chuyên nghiệp xuất sắc dịch thuật truyện, tiểu thuyết, truyện cười và thoại game từ tiếng Trung sang tiếng Việt.
+  // Lấy tối đa 100 từ vựng khớp nhất
+  const topEntries = selectedEntries.slice(0, 100);
+
+  const lines = topEntries.map((e) => `- "${e.zh}" -> "${e.vi}" (Danh mục: ${e.cat})`);
+  return `\n\nBỘ TỪ ĐIỂN THAM KHẢO VÀ BẮT BUỘC ƯU TIÊN SỬ DỤNG CHÍNH XÁC KHI DỊCH:
+${lines.join('\n')}
+Yêu cầu bắt buộc: Dịch chính xác theo các từ vựng, tên riêng, đại từ xưng hô trong bộ từ điển trên khi xuất hiện trong đoạn văn bản.`;
+}
+
+// Hàm dịch văn bản mượt mà bằng Gemini AI / Proxy AI
+async function translateWithGemini(text: string, dictMode: 'both' | 'standard' | 'ai' = 'both'): Promise<string> {
+  const glossaryInstruction = getGlossaryForText(text, dictMode);
+
+  const systemInstruction = `Bạn là dịch giả chuyên nghiệp xuất sắc dịch thuật truyện, tiểu thuyết, truyện cười và thoại game từ tiếng Trung sang tiếng Việt.
 Yêu cầu dịch thuật:
 1. Dịch văn bản tiếng Trung sang tiếng Việt cực kỳ mượt mà, thoát ý, tự nhiên, sinh động và chuẩn văn phong câu chuyện/truyện cười tiếng Việt.
 2. Xử lý mượt mà lời thoại nhân vật, ngữ cảnh hài hước, thành ngữ, ngữ điệu (ví dụ: "你丫" -> "ngươi", "cậu", "mày"; "吐出来" -> "nhổ ra", "nôn ra"; "重要" khi nói về ly nước -> "coi trọng chiếc cốc").
-3. Giữ nguyên cấu trúc xuống dòng, đoạn văn bản, thẻ định dạng (nếu có).
-4. KHÔNG thêm lời giải thích hay chú thích, chỉ trả về nội dung tiếng Việt đã dịch mượt.`,
-    },
-  });
+3. BẮT BUỘC ƯU TIÊN SỬ DỤNG BỘ TỪ ĐIỂN THAM KHẢO (NẾU CÓ). Dịch đúng tên riêng nhân vật, đại từ xưng hô, cụm từ theo danh sách từ điển cung cấp.
+4. Giữ nguyên cấu trúc xuống dòng, đoạn văn bản, thẻ định dạng (nếu có).
+5. KHÔNG thêm lời giải thích hay chú thích, chỉ trả về nội dung tiếng Việt đã dịch mượt.${glossaryInstruction}`;
 
-  return response.text ? response.text.trim() : "";
+  return await callAiModel(systemInstruction, text);
 }
 
 // Hàm trích xuất từ điển (cụm từ, tên riêng) từ bản dịch mượt AI
-async function extractDictionaryWithGemini(sourceText: string, translatedText: string): Promise<Array<{ zh: string; vi: string }>> {
-  const ai = getAiClient();
-  if (!ai) {
-    throw new Error("Chưa có API Key cho Gemini AI để trích xuất từ điển.");
-  }
-
-  const modelToUse = currentAiModel || "gemini-flash-latest";
-
+async function extractDictionaryWithGemini(sourceText: string, translatedText: string): Promise<Array<{ zh: string; vi: string; cat: DictCategory }>> {
   const prompt = `Bạn là chuyên gia biên soạn từ điển Hán-Việt, VietPhrase và Tên riêng.
 Dưới đây là đoạn văn bản gốc tiếng Trung và bản dịch tiếng Việt tương ứng:
 
@@ -69,21 +181,25 @@ ${sourceText.slice(0, 3000)}
 --- BẢN DỊCH AI (TIẾNG VIỆT) ---
 ${translatedText.slice(0, 3000)}
 
-Nhiệm vụ: So sánh 2 văn bản và trích xuất các tên riêng nhân vật/địa danh, thuật ngữ, thành ngữ, danh từ đặc biệt hoặc cụm từ tương ứng giữa tiếng Trung và tiếng Việt để tạo bộ từ điển mới.
-Yêu cầu định dạng đầu ra: Trả về duy nhất một mảng JSON các object dạng [{"zh": "chữ Hán", "vi": "bản dịch tương ứng"}].
-Ví dụ:
+Nhiệm vụ: So sánh 2 văn bản và trích xuất các từ vựng, tên riêng, đại từ, luật nhân xưng hô, phiên âm hoặc cụm từ tương ứng giữa tiếng Trung và tiếng Việt để tạo bộ từ điển AI mới.
+
+BẮT BUỘC phân loại từng từ vựng trích xuất vào chính xác một trong các danh mục (cat) sau:
+1. "AiName": Tên riêng nhân vật, quốc gia, dân tộc, địa danh, tên dự án, tác phẩm (Ví dụ: "中国人" -> "Người Trung Quốc", "美国人" -> "Người Mỹ", "犹太人" -> "Người Do Thái", "林枫" -> "Lâm Phong").
+2. "AiPronouns": Đại từ xưng hô, nhân xưng (Ví dụ: "你" -> "mày/cậu/ngươi", "我" -> "ta/tôi", "他" -> "hắn/y").
+3. "AiLuatNhan": Cụm từ xưng hô, luật nhân xưng hô theo ngữ cảnh.
+4. "AiPhienAm": Phiên âm Hán-Việt đơn tự/kép.
+5. "AiVietPhrase": Cụm từ chung, danh từ, động từ, thuật ngữ, thành ngữ (Ví dụ: "苍蝇" -> "con ruồi", "可行性报告" -> "báo cáo khả thi", "吐出来" -> "nhổ ra/nôn ra").
+6. "AiDict": Từ vựng hỗn hợp khác nếu không phân loại được vào 5 danh mục trên.
+
+Yêu cầu định dạng đầu ra: Trả về duy nhất một mảng JSON các object dạng:
 [
-  {"zh": "林枫", "vi": "Lâm Phong"},
-  {"zh": "九天神龙", "vi": "Cửu Thiên Thần Long"}
+  {"zh": "中国人", "vi": "Người Trung Quốc", "cat": "AiName"},
+  {"zh": "苍蝇", "vi": "con ruồi", "cat": "AiVietPhrase"},
+  {"zh": "吐出来", "vi": "nhổ ra", "cat": "AiVietPhrase"}
 ]
 KHÔNG thêm bất kỳ văn bản giải thích hay thẻ code block nào ngoài mảng JSON hợp lệ.`;
 
-  const response = await ai.models.generateContent({
-    model: modelToUse,
-    contents: prompt,
-  });
-
-  const responseText = response.text ? response.text.trim() : "[]";
+  const responseText = await callAiModel("", prompt);
   let jsonStr = responseText;
   if (jsonStr.includes("```")) {
     jsonStr = jsonStr.replace(/```json/gi, "").replace(/```/g, "").trim();
@@ -94,7 +210,13 @@ KHÔNG thêm bất kỳ văn bản giải thích hay thẻ code block nào ngoà
     if (Array.isArray(parsed)) {
       return parsed
         .filter((item: any) => item && typeof item.zh === 'string' && typeof item.vi === 'string' && item.zh.trim() && item.vi.trim())
-        .map((item: any) => ({ zh: item.zh.trim(), vi: item.vi.trim() }));
+        .map((item: any) => {
+          let cat: DictCategory = 'AiDict';
+          if (item.cat && ALL_CATEGORIES.includes(item.cat as DictCategory)) {
+            cat = item.cat as DictCategory;
+          }
+          return { zh: item.zh.trim(), vi: item.vi.trim(), cat };
+        });
     }
     return [];
   } catch (err) {
@@ -104,11 +226,19 @@ KHÔNG thêm bất kỳ văn bản giải thích hay thẻ code block nào ngoà
 }
 
 // Định nghĩa cấu trúc từ điển phía máy chủ
+type DictCategory = 
+  | 'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm'
+  | 'AiName' | 'AiPronouns' | 'AiLuatNhan' | 'AiVietPhrase' | 'AiPhienAm' | 'AiDict';
+
 interface ServerDictEntry {
   zh: string;
   vi: string;
-  cat: 'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict';
+  cat: DictCategory;
 }
+
+const STANDARD_CATEGORIES: DictCategory[] = ['Name', 'Pronouns', 'LuatNhan', 'VietPhrase', 'PhienAm'];
+const AI_CATEGORIES: DictCategory[] = ['AiName', 'AiPronouns', 'AiLuatNhan', 'AiVietPhrase', 'AiPhienAm', 'AiDict'];
+const ALL_CATEGORIES: DictCategory[] = [...STANDARD_CATEGORIES, ...AI_CATEGORIES];
 
 // Lưu trữ từ điển trên bộ nhớ/đĩa máy chủ
 const serverDictionary: Map<string, ServerDictEntry> = new Map();
@@ -121,25 +251,77 @@ if (!fs.existsSync(DICT_DIR)) {
   fs.mkdirSync(DICT_DIR, { recursive: true });
 }
 
-// Mảng được sắp xếp theo độ dài giảm dần và Map tra cứu nhanh cho thuật toán Maximum Matching
+// Mảng được sắp xếp và Map tra cứu nhanh riêng biệt cho từng chế độ dịch (Standard, AI, Both)
 let sortedDictList: ServerDictEntry[] = [];
-let dictLookupMap = new Map<string, { vi: string; catPriority: number }>();
+let dictLookupMapBoth = new Map<string, { vi: string; catPriority: number }>();
+let dictLookupMapStandard = new Map<string, { vi: string; catPriority: number }>();
+let dictLookupMapAi = new Map<string, { vi: string; catPriority: number }>();
+
+let phienAmMapBoth = new Map<string, string>();
+let phienAmMapStandard = new Map<string, string>();
+let phienAmMapAi = new Map<string, string>();
+
 let maxZhLength = 1;
 
 // Hàm cập nhật cấu trúc tra cứu từ điển
 function rebuildSortedDictList() {
-  const catPriority: Record<string, number> = { Name: 1, Pronouns: 2, LuatNhan: 3, AiDict: 4, VietPhrase: 5, PhienAm: 6 };
+  const catPriority: Record<string, number> = {
+    Name: 1, AiName: 1,
+    Pronouns: 2, AiPronouns: 2,
+    LuatNhan: 3, AiLuatNhan: 3,
+    VietPhrase: 4, AiVietPhrase: 4,
+    PhienAm: 5, AiPhienAm: 5,
+    AiDict: 6
+  };
   
-  dictLookupMap.clear();
+  dictLookupMapBoth.clear();
+  dictLookupMapStandard.clear();
+  dictLookupMapAi.clear();
+
+  phienAmMapBoth.clear();
+  phienAmMapStandard.clear();
+  phienAmMapAi.clear();
+
   maxZhLength = 1;
 
   serverDictionary.forEach((entry) => {
     if (!entry.zh) return;
     const prio = catPriority[entry.cat] || 99;
-    const existing = dictLookupMap.get(entry.zh);
-    if (!existing || prio < existing.catPriority) {
-      dictLookupMap.set(entry.zh, { vi: entry.vi, catPriority: prio });
+    const isStandard = STANDARD_CATEGORIES.includes(entry.cat);
+    const isAi = AI_CATEGORIES.includes(entry.cat);
+
+    // 1. Cụm từ dịch cho chế độ Both
+    const existingBoth = dictLookupMapBoth.get(entry.zh);
+    if (!existingBoth || prio < existingBoth.catPriority) {
+      dictLookupMapBoth.set(entry.zh, { vi: entry.vi, catPriority: prio });
     }
+
+    // 2. Cụm từ dịch cho chế độ Standard (Chỉ từ điển gốc)
+    if (isStandard) {
+      const existingStandard = dictLookupMapStandard.get(entry.zh);
+      if (!existingStandard || prio < existingStandard.catPriority) {
+        dictLookupMapStandard.set(entry.zh, { vi: entry.vi, catPriority: prio });
+      }
+    }
+
+    // 3. Cụm từ dịch cho chế độ AI (Chỉ từ điển AI)
+    if (isAi) {
+      const existingAi = dictLookupMapAi.get(entry.zh);
+      if (!existingAi || prio < existingAi.catPriority) {
+        dictLookupMapAi.set(entry.zh, { vi: entry.vi, catPriority: prio });
+      }
+    }
+
+    // Phiên âm đơn tự
+    if (entry.cat === 'PhienAm' || entry.cat === 'AiPhienAm') {
+      if (entry.zh.length === 1) {
+        const cleanVi = cleanViChoice(entry.vi);
+        phienAmMapBoth.set(entry.zh, cleanVi);
+        if (entry.cat === 'PhienAm') phienAmMapStandard.set(entry.zh, cleanVi);
+        if (entry.cat === 'AiPhienAm') phienAmMapAi.set(entry.zh, cleanVi);
+      }
+    }
+
     if (entry.zh.length > maxZhLength) {
       maxZhLength = entry.zh.length;
     }
@@ -167,8 +349,8 @@ function hasVietnameseAccents(str: string): boolean {
 // Hàm phân tích và làm sạch một dòng trong tệp từ điển
 function parseDictLine(
   rawLine: string,
-  cat: 'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict'
-): { zh: string; vi: string; cat: typeof cat } | null {
+  cat: DictCategory
+): { zh: string; vi: string; cat: DictCategory } | null {
   if (!rawLine) return null;
   const trimmed = rawLine.trim();
 
@@ -214,18 +396,26 @@ function parseDictLine(
 }
 
 // Map tên file tương ứng từng danh mục từ điển
-function getDictFileName(cat: 'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict'): string {
-  if (cat === 'AiDict') return 'AiExtracted.txt';
-  return `${cat}.txt`;
+function getDictFileName(cat: DictCategory): string {
+  switch (cat) {
+    case 'Name': return 'Name.txt';
+    case 'Pronouns': return 'Pronouns.txt';
+    case 'LuatNhan': return 'LuatNhan.txt';
+    case 'VietPhrase': return 'VietPhrase.txt';
+    case 'PhienAm': return 'PhienAm.txt';
+    case 'AiName': return 'AiName.txt';
+    case 'AiPronouns': return 'AiPronouns.txt';
+    case 'AiLuatNhan': return 'AiLuatNhan.txt';
+    case 'AiVietPhrase': return 'AiVietPhrase.txt';
+    case 'AiPhienAm': return 'AiPhienAm.txt';
+    case 'AiDict': return 'AiExtracted.txt';
+    default: return `${cat}.txt`;
+  }
 }
 
 // Hàm nạp từ điển từ các tệp trong thư mục ./dictionaries/
 function loadDictionariesFromDisk() {
-  const categories: Array<'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict'> = [
-    'Name', 'Pronouns', 'LuatNhan', 'VietPhrase', 'PhienAm', 'AiDict'
-  ];
-
-  for (const cat of categories) {
+  for (const cat of ALL_CATEGORIES) {
     const fileName = getDictFileName(cat);
     const filePath = path.join(DICT_DIR, fileName);
     if (fs.existsSync(filePath)) {
@@ -251,7 +441,7 @@ function loadDictionariesFromDisk() {
 loadDictionariesFromDisk();
 
 // Hàm lưu từ điển của 1 danh mục xuống tệp txt trong thư mục ./dictionaries/
-function saveCategoryToDisk(cat: 'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict') {
+function saveCategoryToDisk(cat: DictCategory) {
   const fileName = getDictFileName(cat);
   const filePath = path.join(DICT_DIR, fileName);
   try {
@@ -316,11 +506,6 @@ function formatTranslatedTokens(tokens: string[]): string {
       const isLastPunctuation = /[,.!?:;”’\)\]}]/.test(lastChar);
       const isFirstOpenPunctuation = /[“’\(\[{]/.test(firstChar);
 
-      // Điều kiện thêm khoảng trắng:
-      // 1. Hai từ đứng liền kề
-      // 2. Dấu câu đứng trước từ (ví dụ: ", người" hoặc "! ngươi")
-      // 3. Từ đứng trước ngoặc mở (ví dụ: "hô: “")
-      // 4. Dấu câu đứng trước ngoặc mở (ví dụ: "hô: “")
       if (
         (isLastWord && isFirstWord) ||
         (isLastPunctuation && isFirstWord) ||
@@ -336,19 +521,26 @@ function formatTranslatedTokens(tokens: string[]): string {
   return out;
 }
 
-// Thuật toán dịch Forward Maximum Matching
-function translateSegment(text: string, maxPhraseLength: number = 16): string {
+// Thuật toán dịch Forward Maximum Matching hỗ trợ chọn Bộ từ điển (both | standard | ai)
+function translateSegment(
+  text: string, 
+  maxPhraseLength: number = 16,
+  dictMode: 'both' | 'standard' | 'ai' = 'both'
+): string {
   let i = 0;
   const len = text.length;
   const resultTokens: string[] = [];
 
-  // Tra nhanh PhienAm
-  const phienAmMap = new Map<string, string>();
-  serverDictionary.forEach((entry) => {
-    if (entry.cat === 'PhienAm' && entry.zh.length === 1) {
-      phienAmMap.set(entry.zh, cleanViChoice(entry.vi));
-    }
-  });
+  let lookupMap = dictLookupMapBoth;
+  let phienAmMap = phienAmMapBoth;
+
+  if (dictMode === 'standard') {
+    lookupMap = dictLookupMapStandard;
+    phienAmMap = phienAmMapStandard;
+  } else if (dictMode === 'ai') {
+    lookupMap = dictLookupMapAi;
+    phienAmMap = phienAmMapAi;
+  }
 
   const effectiveMaxLen = Math.min(maxZhLength, maxPhraseLength > 0 ? maxPhraseLength : 16);
 
@@ -369,7 +561,7 @@ function translateSegment(text: string, maxPhraseLength: number = 16): string {
 
     for (let subLen = maxLookahead; subLen >= 1; subLen--) {
       const sub = text.substring(i, i + subLen);
-      const entry = dictLookupMap.get(sub);
+      const entry = lookupMap.get(sub);
       if (entry) {
         const cleanVi = cleanViChoice(entry.vi);
         resultTokens.push(cleanVi);
@@ -394,11 +586,15 @@ function translateSegment(text: string, maxPhraseLength: number = 16): string {
 }
 
 // Hàm dịch văn bản bằng từ điển máy chủ (Bảo vệ thẻ XML/HTML & biến)
-function translateTextServer(text: string, options: { maxPhraseLength?: number; translateKeywords?: boolean } = {}): string {
+function translateTextServer(
+  text: string, 
+  options: { maxPhraseLength?: number; translateKeywords?: boolean; dictMode?: 'both' | 'standard' | 'ai' } = {}
+): string {
   if (!text || typeof text !== 'string') return text;
   if (serverDictionary.size === 0) return text;
 
   const maxPhraseLength = options.maxPhraseLength || 16;
+  const dictMode = options.dictMode || 'both';
 
   // Tách văn bản thành thẻ bảo vệ (<tag>, {{var}}) và văn bản thường
   const tagRegex = /(<[^>]+>|\{\{[^}]+\}\})/g;
@@ -419,18 +615,18 @@ function translateTextServer(text: string, options: { maxPhraseLength?: number; 
 
   const translatedTokens = tokens.map((token) => {
     if (token.isTag) return token.content;
-    return translateSegment(token.content, maxPhraseLength);
+    return translateSegment(token.content, maxPhraseLength, dictMode);
   });
 
   return translatedTokens.join('');
 }
 
 // Dịch mảng chuỗi (keys, keysecondary)
-function translateArrayServer(arr: any[]): any[] {
+function translateArrayServer(arr: any[], options: { maxPhraseLength?: number; dictMode?: 'both' | 'standard' | 'ai' } = {}): any[] {
   if (!Array.isArray(arr)) return arr;
   return arr.map((item) => {
     if (typeof item === 'string') {
-      return translateTextServer(item);
+      return translateTextServer(item, options);
     }
     return item;
   });
@@ -458,26 +654,33 @@ async function startServer() {
     });
   });
 
-  // Endpoint lấy và cập nhật cấu hình AI (Model, Proxy, Custom Key)
+  // Endpoint lấy và cập nhật cấu hình AI (Model, Proxy, Custom Key, Provider Type)
   app.get("/api/ai/config", (req, res) => {
     res.json({
       activeModel: currentAiModel,
+      providerType: aiProviderType,
       hasApiKey: !!(customApiKey.trim() || process.env.GEMINI_API_KEY),
       proxyUrl: aiProxyUrl,
       availableModels: [
         "gemini-flash-latest",
         "gemini-2.5-flash",
         "gemini-3.1-pro-preview",
-        "gemini-3.1-flash-lite"
+        "gemini-3.1-flash-lite",
+        "google/gemini-2.5-flash",
+        "gpt-4o-mini",
+        "deepseek-chat"
       ]
     });
   });
 
   app.post("/api/ai/config", (req, res) => {
     try {
-      const { activeModel, customKey, proxyUrl } = req.body;
+      const { activeModel, customKey, proxyUrl, providerType } = req.body;
       if (typeof activeModel === 'string' && activeModel.trim()) {
         currentAiModel = activeModel.trim();
+      }
+      if (typeof providerType === 'string' && providerType.trim()) {
+        aiProviderType = providerType.trim();
       }
       if (typeof customKey === 'string') {
         customApiKey = customKey.trim();
@@ -490,6 +693,7 @@ async function startServer() {
         success: true,
         message: "Cập nhật cấu hình AI máy chủ thành công!",
         activeModel: currentAiModel,
+        providerType: aiProviderType,
         hasApiKey: !!(customApiKey.trim() || process.env.GEMINI_API_KEY),
         proxyUrl: aiProxyUrl
       });
@@ -506,13 +710,26 @@ async function startServer() {
       LuatNhan: 0,
       VietPhrase: 0,
       PhienAm: 0,
+      AiName: 0,
+      AiPronouns: 0,
+      AiLuatNhan: 0,
+      AiVietPhrase: 0,
+      AiPhienAm: 0,
       AiDict: 0,
+      TotalStandard: 0,
+      TotalAi: 0,
       Total: serverDictionary.size,
     };
 
     serverDictionary.forEach((entry) => {
       if (stats[entry.cat] !== undefined) {
         stats[entry.cat]++;
+      }
+      if (STANDARD_CATEGORIES.includes(entry.cat)) {
+        stats.TotalStandard++;
+      }
+      if (AI_CATEGORIES.includes(entry.cat)) {
+        stats.TotalAi++;
       }
     });
 
@@ -531,11 +748,13 @@ async function startServer() {
 
   // Endpoint tra cứu / duyệt danh sách từ trong máy chủ
   app.get("/api/dictionary/entries", (req, res) => {
-    const { category, search, limit = 100 } = req.query;
+    const { category, group, search, limit = 100 } = req.query;
     const result: ServerDictEntry[] = [];
     const max = Number(limit) || 100;
 
     serverDictionary.forEach((entry) => {
+      if (group === 'standard' && !STANDARD_CATEGORIES.includes(entry.cat)) return;
+      if (group === 'ai' && !AI_CATEGORIES.includes(entry.cat)) return;
       if (category && entry.cat !== category) return;
       if (search && typeof search === 'string') {
         const q = search.toLowerCase();
@@ -549,36 +768,38 @@ async function startServer() {
     res.json({ success: true, count: result.length, total: serverDictionary.size, entries: result });
   });
 
-  // Endpoint dịch văn bản qua API máy chủ (Hỗ trợ từ điển VietPhrase và AI Gemini)
+  // Endpoint dịch văn bản qua API máy chủ (Hỗ trợ lựa chọn bộ từ điển & AI Gemini)
   app.post("/api/translate-text", async (req, res) => {
     try {
-      const { text, engine, maxPhraseLength } = req.body;
+      const { text, engine, maxPhraseLength, dictMode } = req.body;
       if (typeof text !== 'string') {
         return res.status(400).json({ error: 'Thiếu trường text' });
       }
 
       const parsedMaxLen = typeof maxPhraseLength === 'number' && maxPhraseLength > 0 ? maxPhraseLength : 16;
+      const parsedDictMode = (dictMode === 'standard' || dictMode === 'ai') ? dictMode : 'both';
 
       if (engine === 'gemini') {
         try {
-          const translated = await translateWithGemini(text);
-          return res.json({ success: true, original: text, translated, engine: 'gemini' });
+          const translated = await translateWithGemini(text, parsedDictMode);
+          return res.json({ success: true, original: text, translated, engine: 'gemini', dictMode: parsedDictMode });
         } catch (geminiErr: any) {
           console.error("Lỗi dịch Gemini AI:", geminiErr);
-          const fallbackTranslated = translateTextServer(text, { maxPhraseLength: parsedMaxLen });
+          const fallbackTranslated = translateTextServer(text, { maxPhraseLength: parsedMaxLen, dictMode: parsedDictMode });
           return res.json({
             success: true,
             original: text,
             translated: fallbackTranslated,
             engine: 'vietphrase',
+            dictMode: parsedDictMode,
             fallbackNotice: `Không thể gọi Gemini AI (${geminiErr.message || 'Lỗi kết nối'}). Đã chuyển sang Dịch Từ Điển VietPhrase.`,
           });
         }
       }
 
-      // Mặc định: Dịch từ điển VietPhrase
-      const translated = translateTextServer(text, { maxPhraseLength: parsedMaxLen });
-      res.json({ success: true, original: text, translated, engine: 'vietphrase' });
+      // Mặc định: Dịch từ điển VietPhrase với lựa chọn bộ từ điển dictMode
+      const translated = translateTextServer(text, { maxPhraseLength: parsedMaxLen, dictMode: parsedDictMode });
+      res.json({ success: true, original: text, translated, engine: 'vietphrase', dictMode: parsedDictMode });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -604,35 +825,43 @@ async function startServer() {
   app.post("/api/dictionary/add-entries", (req, res) => {
     try {
       const { category, entries } = req.body;
-      if (!category || !Array.isArray(entries)) {
-        return res.status(400).json({ error: "Thiếu thông tin danh mục hoặc mảng entries." });
+      if (!Array.isArray(entries)) {
+        return res.status(400).json({ error: "Thiếu mảng entries." });
       }
 
-      const cat = category as 'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict';
+      const defaultCat = (category && ALL_CATEGORIES.includes(category as DictCategory)) ? (category as DictCategory) : 'AiDict';
       let countAdded = 0;
+      const affectedCats = new Set<DictCategory>();
 
       for (const item of entries) {
         if (item && item.zh && item.vi) {
           const zhClean = String(item.zh).trim();
           const viClean = String(item.vi).trim();
+          let catToUse: DictCategory = defaultCat;
+
+          if (item.cat && ALL_CATEGORIES.includes(item.cat as DictCategory)) {
+            catToUse = item.cat as DictCategory;
+          }
+
           if (zhClean && viClean) {
             const entry: ServerDictEntry = {
               zh: zhClean,
               vi: viClean,
-              cat: cat,
+              cat: catToUse,
             };
-            serverDictionary.set(`${cat}_${entry.zh}`, entry);
+            serverDictionary.set(`${catToUse}_${entry.zh}`, entry);
+            affectedCats.add(catToUse);
             countAdded++;
           }
         }
       }
 
       rebuildSortedDictList();
-      saveCategoryToDisk(cat);
+      affectedCats.forEach((c) => saveCategoryToDisk(c));
 
       res.json({
         success: true,
-        message: `Đã lưu thành công ${countAdded} từ vựng mới vào bộ từ điển [${cat}]`,
+        message: `Đã lưu thành công ${countAdded} từ vựng mới vào bộ từ điển máy chủ`,
         totalDictSize: serverDictionary.size,
       });
     } catch (err: any) {
@@ -648,10 +877,12 @@ async function startServer() {
         return res.status(400).json({ error: 'Thiếu tham số category hoặc textContent' });
       }
 
+      const cat = category as DictCategory;
+
       if (overwrite) {
         // Xóa các từ thuộc danh mục này
         serverDictionary.forEach((val, key) => {
-          if (val.cat === category) {
+          if (val.cat === cat) {
             serverDictionary.delete(key);
           }
         });
@@ -661,7 +892,7 @@ async function startServer() {
       let countAdded = 0;
 
       for (let i = 0; i < lines.length; i++) {
-        const entry = parseDictLine(lines[i], category);
+        const entry = parseDictLine(lines[i], cat);
         if (entry) {
           serverDictionary.set(`${entry.cat}_${entry.zh}`, entry);
           countAdded++;
@@ -669,11 +900,11 @@ async function startServer() {
       }
 
       rebuildSortedDictList();
-      saveCategoryToDisk(category);
+      saveCategoryToDisk(cat);
 
       res.json({
         success: true,
-        message: `Đã nạp ${countAdded} mục từ vào kho máy chủ [${category}]`,
+        message: `Đã nạp ${countAdded} mục từ vào kho máy chủ [${cat}]`,
         totalDictSize: serverDictionary.size,
       });
     } catch (err: any) {
@@ -683,19 +914,26 @@ async function startServer() {
 
   // 3. Endpoint xóa từ điển máy chủ
   app.post("/api/dictionary/clear", (req, res) => {
-    const { category } = req.body || {};
-    const categories: Array<'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict'> = [
-      'Name', 'Pronouns', 'LuatNhan', 'VietPhrase', 'PhienAm', 'AiDict'
-    ];
+    const { category, group } = req.body || {};
 
-    if (category) {
+    if (group === 'standard') {
+      serverDictionary.forEach((val, key) => {
+        if (STANDARD_CATEGORIES.includes(val.cat)) serverDictionary.delete(key);
+      });
+      for (const cat of STANDARD_CATEGORIES) saveCategoryToDisk(cat);
+    } else if (group === 'ai') {
+      serverDictionary.forEach((val, key) => {
+        if (AI_CATEGORIES.includes(val.cat)) serverDictionary.delete(key);
+      });
+      for (const cat of AI_CATEGORIES) saveCategoryToDisk(cat);
+    } else if (category && ALL_CATEGORIES.includes(category as DictCategory)) {
       serverDictionary.forEach((val, key) => {
         if (val.cat === category) serverDictionary.delete(key);
       });
-      saveCategoryToDisk(category as any);
+      saveCategoryToDisk(category as DictCategory);
     } else {
       serverDictionary.clear();
-      for (const cat of categories) {
+      for (const cat of ALL_CATEGORIES) {
         saveCategoryToDisk(cat);
       }
     }
@@ -706,7 +944,7 @@ async function startServer() {
   // Endpoint xuất/tải tệp TXT từ điển
   app.get("/api/dictionary/export-txt", (req, res) => {
     const { category } = req.query;
-    const catStr = (category as 'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'PhienAm' | 'AiDict') || 'VietPhrase';
+    const catStr = (category as DictCategory) || 'VietPhrase';
     const fileName = getDictFileName(catStr);
     const filePath = path.join(DICT_DIR, fileName);
 

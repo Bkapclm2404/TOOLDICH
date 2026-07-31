@@ -35,6 +35,7 @@ export default function App() {
   const [translationEngine, setTranslationEngine] = useState<'gemini' | 'vietphrase'>('gemini');
   const [segmentationMode, setSegmentationMode] = useState<'paragraph' | 'sentence'>('paragraph');
   const [maxPhraseLength, setMaxPhraseLength] = useState<number>(16);
+  const [dictMode, setDictMode] = useState<'both' | 'standard' | 'ai'>('both');
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const isPausedRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -52,8 +53,8 @@ export default function App() {
   // AI Dictionary Extraction Modal State
   const [isExtractModalOpen, setIsExtractModalOpen] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
-  const [extractedCategory, setExtractedCategory] = useState<'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'AiDict'>('AiDict');
-  const [extractedPairs, setExtractedPairs] = useState<Array<{ zh: string; vi: string; checked: boolean }>>([]);
+  const [extractedCategory, setExtractedCategory] = useState<string>('AiDict');
+  const [extractedPairs, setExtractedPairs] = useState<Array<{ zh: string; vi: string; cat?: string; checked: boolean }>>([]);
   const [extractStatus, setExtractStatus] = useState<string | null>(null);
 
   // AI Server & Proxy Configuration State
@@ -62,6 +63,7 @@ export default function App() {
   const [aiProxyUrl, setAiProxyUrl] = useState<string>('');
   const [customApiKeyInput, setCustomApiKeyInput] = useState<string>('');
   const [selectedModelInput, setSelectedModelInput] = useState<string>('gemini-flash-latest');
+  const [providerTypeInput, setProviderTypeInput] = useState<string>('gemini');
   const [proxyUrlInput, setProxyUrlInput] = useState<string>('');
   const [isSavingAiConfig, setIsSavingAiConfig] = useState(false);
   const [aiConfigMessage, setAiConfigMessage] = useState<string | null>(null);
@@ -78,9 +80,9 @@ export default function App() {
     return path;
   };
 
-  const fetchWithFallback = async (path: string, options?: RequestInit): Promise<Response> => {
+  const fetchWithFallback = async (path: string, options?: RequestInit, forceInternalOnly = false): Promise<Response> => {
     // Nếu bật API kết nối ngoài, thử gọi máy chủ ngoài trước
-    if (useExternalApi && apiBaseUrl.trim()) {
+    if (!forceInternalOnly && useExternalApi && apiBaseUrl.trim()) {
       const extUrl = getEndpoint(path, false);
       try {
         const res = await fetch(extUrl, options);
@@ -92,7 +94,7 @@ export default function App() {
         console.warn(`Lỗi mạng khi kết nối máy chủ ngoài cho API [${path}]. Tự động chuyển sang Máy chủ AI/Nội bộ...`, err);
       }
     }
-    // Tự động dùng máy chủ nội bộ nếu máy chủ ngoài bị lỗi hoặc không có
+    // Tự động dùng máy chủ nội bộ nếu máy chủ ngoài bị lỗi, không có, hoặc bắt buộc dùng nội bộ
     const intUrl = getEndpoint(path, true);
     return await fetch(intUrl, options);
   };
@@ -123,7 +125,7 @@ export default function App() {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [sourceText, autoTranslate, translationEngine, segmentationMode, maxPhraseLength, apiBaseUrl, useExternalApi]);
+  }, [sourceText, autoTranslate, translationEngine, segmentationMode, maxPhraseLength, dictMode, apiBaseUrl, useExternalApi]);
 
   // --- METHODS ---
   const fetchStats = async () => {
@@ -162,13 +164,14 @@ export default function App() {
     try {
       const res = await fetchWithFallback('/api/ai/config', {
         headers: { 'ngrok-skip-browser-warning': 'true' }
-      });
+      }, true); // Bắt buộc dùng máy chủ nội bộ cho cấu hình AI
       if (res.ok) {
         const data = await res.json();
         setActiveAiModel(data.activeModel || 'gemini-flash-latest');
         setHasAiApiKey(!!data.hasApiKey);
         setAiProxyUrl(data.proxyUrl || '');
         setSelectedModelInput(data.activeModel || 'gemini-flash-latest');
+        if (data.providerType) setProviderTypeInput(data.providerType);
         setProxyUrlInput(data.proxyUrl || '');
       }
     } catch (err) {
@@ -188,10 +191,11 @@ export default function App() {
         },
         body: JSON.stringify({
           activeModel: selectedModelInput,
+          providerType: providerTypeInput,
           customKey: customApiKeyInput,
           proxyUrl: proxyUrlInput,
         }),
-      });
+      }, true); // Bắt buộc dùng máy chủ nội bộ cho cấu hình AI
 
       if (res.ok) {
         const data = await res.json();
@@ -277,6 +281,7 @@ export default function App() {
           continue;
         }
 
+        const isGeminiEngine = engineToUse === 'gemini';
         const res = await fetchWithFallback('/api/translate-text', {
           method: 'POST',
           headers: { 
@@ -287,9 +292,10 @@ export default function App() {
             text: chunk, 
             engine: engineToUse,
             maxPhraseLength: maxPhraseLength,
+            dictMode: dictMode,
           }),
           signal: controller.signal,
-        });
+        }, isGeminiEngine); // Bắt buộc dùng máy chủ nội bộ nếu là dịch bằng AI Gemini
 
         if (res.ok) {
           const data = await res.json();
@@ -349,13 +355,18 @@ export default function App() {
           sourceText,
           translatedText,
         }),
-      });
+      }, true); // Bắt buộc dùng máy chủ nội bộ vì tính năng này dùng AI Gemini
 
       if (res.ok) {
         const data = await res.json();
         if (data.pairs && Array.isArray(data.pairs) && data.pairs.length > 0) {
-          setExtractedPairs(data.pairs.map((p: any) => ({ zh: p.zh, vi: p.vi, checked: true })));
-          setExtractStatus(`Đã trích xuất thành công ${data.pairs.length} từ vựng/tên riêng từ bản dịch AI!`);
+          setExtractedPairs(data.pairs.map((p: any) => ({
+            zh: p.zh,
+            vi: p.vi,
+            cat: p.cat || extractedCategory || 'AiDict',
+            checked: true
+          })));
+          setExtractStatus(`Đã trích xuất & tự động phân loại ${data.pairs.length} từ vựng/tên riêng từ bản dịch AI!`);
         } else {
           setExtractStatus("Không tìm thấy cụm từ/tên riêng mới nào trong đoạn văn bản này.");
         }
@@ -374,7 +385,7 @@ export default function App() {
   const handleSaveExtractedPairs = async () => {
     const selectedEntries = extractedPairs
       .filter(p => p.checked && p.zh.trim() && p.vi.trim())
-      .map(p => ({ zh: p.zh.trim(), vi: p.vi.trim() }));
+      .map(p => ({ zh: p.zh.trim(), vi: p.vi.trim(), cat: p.cat || extractedCategory || 'AiDict' }));
 
     if (selectedEntries.length === 0) {
       alert("Vui lòng chọn ít nhất 1 cặp từ vựng để lưu.");
@@ -382,7 +393,7 @@ export default function App() {
     }
 
     try {
-      setExtractStatus("Đang lưu các từ vựng vào bộ từ điển máy chủ...");
+      setExtractStatus("Đang lưu các từ vựng vào các danh mục từ điển máy chủ...");
       const res = await fetchWithFallback('/api/dictionary/add-entries', {
         method: 'POST',
         headers: {
@@ -396,10 +407,9 @@ export default function App() {
       });
 
       if (res.ok) {
-        const data = await res.json();
-        alert(`Đã lưu thành công ${selectedEntries.length} từ vựng vào danh mục [${extractedCategory}]!`);
+        alert(`Đã lưu thành công ${selectedEntries.length} từ vựng vào các tệp bộ từ điển tương ứng!`);
         setIsExtractModalOpen(false);
- fetchStats();
+        fetchStats();
       } else {
         const err = await res.json().catch(() => ({}));
         alert(`Lỗi lưu từ điển: ${err.error || res.statusText}`);
@@ -451,8 +461,9 @@ export default function App() {
     window.open(url, '_blank');
   };
 
-  const handleClearCategory = async (category: string, catName: string) => {
-    if (!confirm(`Bạn có chắc chắn muốn xóa toàn bộ dữ liệu từ điển [${catName}] trên máy chủ?`)) return;
+  const handleClearCategory = async (category?: string, catName?: string, group?: 'standard' | 'ai') => {
+    const label = catName || (group === 'standard' ? 'Toàn bộ từ điển Gốc' : group === 'ai' ? 'Toàn bộ từ điển AI' : 'Toàn bộ từ điển');
+    if (!confirm(`Bạn có chắc chắn muốn xóa dữ liệu [${label}] trên máy chủ?`)) return;
     try {
       const res = await fetchWithFallback('/api/dictionary/clear', {
         method: 'POST',
@@ -460,7 +471,7 @@ export default function App() {
           'Content-Type': 'application/json',
           'ngrok-skip-browser-warning': 'true'
         },
-        body: JSON.stringify({ category }),
+        body: JSON.stringify({ category, group }),
       });
       if (res.ok) {
         fetchStats();
@@ -653,52 +664,77 @@ export default function App() {
             {/* AI Model & Proxy Settings Block */}
             <div className="p-5 border-b border-slate-800/80 bg-slate-950/40 space-y-4">
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                <Sparkles size={16} className="text-amber-400" /> Cấu Hình AI & Proxy
+                <Sparkles size={16} className="text-amber-400" /> Cấu Hình Máy Chủ AI & Proxy Trung Gian
               </h2>
 
               <div className="space-y-3 text-xs">
-                {/* Chọn Model AI */}
+                {/* Chọn Chuẩn AI / Provider */}
                 <div>
-                  <label className="text-slate-400 font-semibold block mb-1">Loại Model AI Máy Chủ:</label>
+                  <label className="text-slate-400 font-semibold block mb-1">Định Dạng Kết Nối AI (Provider):</label>
                   <select
+                    value={providerTypeInput}
+                    onChange={(e) => setProviderTypeInput(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-amber-300 font-bold outline-none focus:border-amber-500"
+                  >
+                    <option value="gemini">⚡ Google Gemini API / Gemini Proxy (Định dạng Google)</option>
+                    <option value="openai">🌐 OpenAI / OpenRouter / Third-Party Proxy (v1/chat/completions)</option>
+                  </select>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Cho phép kết nối bất kỳ máy chủ AI trung gian, OpenRouter hoặc Proxy tùy chọn mà <b>không bắt buộc dùng Key Google AI trực tiếp</b>.
+                  </p>
+                </div>
+
+                {/* Chọn / Nhập Model AI */}
+                <div>
+                  <label className="text-slate-400 font-semibold block mb-1">Tên Model AI:</label>
+                  <input
+                    type="text"
+                    list="ai-model-list"
                     value={selectedModelInput}
                     onChange={(e) => setSelectedModelInput(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 font-semibold outline-none focus:border-amber-500"
-                  >
-                    <option value="gemini-flash-latest">gemini-flash-latest (Khuyên dùng)</option>
-                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                    <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Cao cấp)</option>
-                    <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Siêu nhẹ)</option>
-                  </select>
+                    placeholder="Ví dụ: gemini-flash-latest, google/gemini-2.5-flash, deepseek-chat..."
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 font-mono text-xs outline-none focus:border-amber-500"
+                  />
+                  <datalist id="ai-model-list">
+                    <option value="gemini-flash-latest" />
+                    <option value="gemini-2.5-flash" />
+                    <option value="gemini-3.1-pro-preview" />
+                    <option value="gemini-3.1-flash-lite" />
+                    <option value="google/gemini-2.5-flash" />
+                    <option value="gpt-4o-mini" />
+                    <option value="deepseek-chat" />
+                  </datalist>
                 </div>
 
                 {/* Máy Chủ Proxy AI Trung Gian */}
                 <div>
-                  <label className="text-slate-400 font-semibold block mb-1">Máy Chủ Proxy Trung Gian (Tùy chọn):</label>
+                  <label className="text-slate-400 font-semibold block mb-1">Địa Chỉ Proxy Trung Gian (Proxy Base URL):</label>
                   <input
                     type="text"
                     value={proxyUrlInput}
                     onChange={(e) => setProxyUrlInput(e.target.value)}
-                    placeholder="Ví dụ: https://my-ai-proxy.com/v1beta"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 text-xs outline-none focus:border-amber-500"
+                    placeholder={providerTypeInput === 'openai' ? "Ví dụ: https://openrouter.ai/api/v1" : "Ví dụ: https://my-ai-proxy.com/v1beta"}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 text-xs outline-none focus:border-amber-500 font-mono"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Nhập base URL proxy nếu bạn muốn gọi AI qua gateway/proxy trung gian.
+                    {providerTypeInput === 'openai' 
+                      ? "Nhập Base URL của OpenRouter hoặc OpenAI proxy (VD: https://openrouter.ai/api/v1)." 
+                      : "Nhập Base URL của Gemini proxy nếu gọi AI qua cổng trung gian."}
                   </p>
                 </div>
 
-                {/* Custom Gemini API Key */}
+                {/* API Key / Token */}
                 <div>
-                  <label className="text-slate-400 font-semibold block mb-1">Custom Gemini API Key (Tùy chọn):</label>
+                  <label className="text-slate-400 font-semibold block mb-1">API Key / Access Token (Không bắt buộc key Google):</label>
                   <input
                     type="password"
                     value={customApiKeyInput}
                     onChange={(e) => setCustomApiKeyInput(e.target.value)}
-                    placeholder="Dán Gemini API Key của bạn..."
+                    placeholder="Nhập Key OpenRouter (sk-or-v1-...), Key Proxy hoặc Gemini API Key..."
                     className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 text-xs outline-none focus:border-amber-500"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Trạng thái key: {hasAiApiKey ? <span className="text-emerald-400 font-bold">Đã thiết lập Key</span> : <span className="text-amber-400 font-bold">Chưa có Key</span>}
+                    Trạng thái key: {hasAiApiKey ? <span className="text-emerald-400 font-bold">Đã có Key/Token</span> : <span className="text-amber-400 font-bold">Chưa thiết lập Key</span>}
                   </p>
                 </div>
 
@@ -942,6 +978,50 @@ export default function App() {
                       <span className="text-[10px] text-slate-500 font-medium">ký tự</span>
                     </div>
                   </div>
+
+                  {/* Lựa chọn sử dụng bộ từ điển nào cho dịch từ điển */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1" title="Lựa chọn bộ từ điển sử dụng cho Dịch Từ Điển (Dịch AI không ảnh hưởng)">
+                      <BookOpen size={13} className="text-amber-400" />
+                      Bộ TĐ khi dịch từ điển:
+                    </span>
+                    <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800">
+                      <button
+                        onClick={() => setDictMode('both')}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all flex items-center gap-1 ${
+                          dictMode === 'both'
+                            ? 'bg-slate-800 text-amber-300 font-bold border border-slate-700 shadow-sm'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Dùng kết hợp cả Bộ Từ Điển Gốc và Bộ Từ Điển AI"
+                      >
+                        Cả 2 bộ (Gốc + AI)
+                      </button>
+                      <button
+                        onClick={() => setDictMode('standard')}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all flex items-center gap-1 ${
+                          dictMode === 'standard'
+                            ? 'bg-slate-800 text-emerald-400 font-bold border border-slate-700 shadow-sm'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Chỉ dùng Bộ Từ Điển Gốc (VietPhrase.txt, Name.txt...)"
+                      >
+                        TĐ Gốc (Standard)
+                      </button>
+                      <button
+                        onClick={() => setDictMode('ai')}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all flex items-center gap-1 ${
+                          dictMode === 'ai'
+                            ? 'bg-slate-800 text-amber-400 font-bold border border-slate-700 shadow-sm'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Chỉ dùng Bộ Từ Điển AI (AiVietPhrase, AiName, AiExtracted...)"
+                      >
+                        <Sparkles size={12} className="text-amber-400" />
+                        TĐ AI
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 min-h-0">
@@ -1157,69 +1237,144 @@ export default function App() {
               <div className="space-y-6 max-w-4xl">
                 
                 {/* Stats cards */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
-                  {Object.entries(stats.categories).map(([cat, count]) => (
-                    <div 
-                      key={cat} 
-                      className={`p-3 rounded-xl border transition-all ${
-                        cat === 'AiDict' 
-                          ? 'bg-amber-950/20 border-amber-500/40 shadow-sm' 
-                          : 'bg-slate-900 border-slate-800'
-                      }`}
-                    >
-                      <div className={`text-xs font-semibold flex items-center gap-1 ${cat === 'AiDict' ? 'text-amber-400' : 'text-slate-400'}`}>
-                        {cat === 'AiDict' && <Sparkles size={12} className="text-amber-400" />}
-                        {cat === 'AiDict' ? 'TĐ AI (Extracted)' : cat}
-                      </div>
-                      <div className="text-lg font-bold text-white mt-1">{Number(count).toLocaleString('vi-VN')}</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="p-4 rounded-xl border bg-slate-900 border-slate-800">
+                    <div className="text-xs font-semibold text-slate-400">TỔNG TỪ VỰNG TRONG KHO</div>
+                    <div className="text-2xl font-bold text-emerald-400 mt-1">{stats.total.toLocaleString('vi-VN')}</div>
+                  </div>
+                  <div className="p-4 rounded-xl border bg-slate-900 border-slate-800">
+                    <div className="text-xs font-semibold text-slate-400">BỘ TỪ ĐIỂN GỐC (STANDARD)</div>
+                    <div className="text-2xl font-bold text-slate-200 mt-1">{(stats.categories['TotalStandard'] || 0).toLocaleString('vi-VN')}</div>
+                  </div>
+                  <div className="p-4 rounded-xl border bg-amber-950/20 border-amber-500/30">
+                    <div className="text-xs font-semibold text-amber-400 flex items-center gap-1">
+                      <Sparkles size={12} /> BỘ TỪ ĐIỂN AI (AI SET)
                     </div>
-                  ))}
+                    <div className="text-2xl font-bold text-amber-300 mt-1">{(stats.categories['TotalAi'] || 0).toLocaleString('vi-VN')}</div>
+                  </div>
                 </div>
 
-                {/* Khối quản lý riêng bộ từ điển trích xuất từ AI (AiExtracted.txt) */}
-                <div className="bg-amber-950/20 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg">
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-amber-500/20 border border-amber-500/30 rounded-xl">
-                        <Sparkles className="text-amber-300" size={20} />
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-bold text-amber-200 flex items-center gap-2">
-                          Bộ Từ Điển AI (`AiExtracted.txt`)
-                          <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full border border-amber-500/30 font-mono">
-                            {Number(stats.categories['AiDict'] || 0).toLocaleString('vi-VN')} từ vựng
-                          </span>
-                        </h3>
-                        <p className="text-xs text-amber-300/70 mt-0.5">
-                          Tách riêng hoàn toàn tệp từ điển do AI tự động tổng hợp từ bản dịch mượt. Không đè lên VietPhrase gốc.
-                        </p>
-                      </div>
-                    </div>
+                {/* Khối nạp tệp TXT vào máy chủ */}
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Upload size={16} className="text-emerald-400" /> Nạp tệp TXT vào Bộ Từ Điển Máy Chủ
+                  </h3>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                    <select
+                      value={uploadCategory}
+                      onChange={(e) => setUploadCategory(e.target.value)}
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none font-medium"
+                    >
+                      <optgroup label="✨ Bộ Từ Điển AI">
+                        <option value="AiDict">✨ AI Extracted (AiExtracted.txt)</option>
+                        <option value="AiVietPhrase">✨ AI VietPhrase (AiVietPhrase.txt)</option>
+                        <option value="AiName">✨ AI Name (AiName.txt)</option>
+                        <option value="AiPronouns">✨ AI Pronouns (AiPronouns.txt)</option>
+                        <option value="AiLuatNhan">✨ AI LuatNhan (AiLuatNhan.txt)</option>
+                        <option value="AiPhienAm">✨ AI PhienAm (AiPhienAm.txt)</option>
+                      </optgroup>
+                      <optgroup label="📚 Bộ Từ Điển Gốc">
+                        <option value="VietPhrase">VietPhrase (VietPhrase.txt)</option>
+                        <option value="Name">Name (Name.txt)</option>
+                        <option value="Pronouns">Pronouns (Pronouns.txt)</option>
+                        <option value="LuatNhan">LuatNhan (LuatNhan.txt)</option>
+                        <option value="PhienAm">PhienAm (PhienAm.txt)</option>
+                      </optgroup>
+                    </select>
 
-                    <div className="flex items-center gap-2 self-end sm:self-center">
-                      <button
-                        onClick={() => handleExportTxt('AiDict')}
-                        className="bg-amber-600/30 hover:bg-amber-600/40 text-amber-200 border border-amber-500/40 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
-                        title="Tải tệp AiExtracted.txt về máy"
-                      >
-                        <Upload size={14} className="rotate-180" /> Tải tệp AiExtracted.txt
-                      </button>
-                      <button
-                        onClick={() => handleClearCategory('AiDict', 'Từ điển AI (AiExtracted.txt)')}
-                        className="bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
-                        title="Xóa riêng bộ từ điển AI trích xuất"
-                      >
-                        <Trash2 size={14} /> Dọn tệp AI
-                      </button>
-                    </div>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleUpload}
+                      accept=".txt"
+                      multiple
+                      className="hidden"
+                    />
+
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2"
+                    >
+                      <Upload size={14} /> Chọn tệp TXT để nạp
+                    </button>
+
+                    {uploadStatus && (
+                      <span className="text-xs text-amber-400 font-semibold self-center">{uploadStatus}</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Khối BỘ TỪ ĐIỂN AI (Phân chia như từ điển gốc) */}
+                <div className="bg-amber-950/20 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h3 className="text-sm font-bold text-amber-200 flex items-center gap-2">
+                      <Sparkles className="text-amber-300" size={16} />
+                      Bộ Từ Điển AI (Cấu trúc & Phân chia tương đương bộ gốc)
+                    </h3>
+                    <button
+                      onClick={() => handleClearCategory(undefined, 'Toàn bộ từ điển AI', 'ai')}
+                      className="text-xs bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 px-3 py-1 rounded-lg font-bold transition-all flex items-center gap-1.5"
+                    >
+                      <Trash2 size={13} /> Dọn dẹp toàn bộ bộ từ điển AI
+                    </button>
+                  </div>
+                  <p className="text-xs text-amber-300/70">
+                    Bộ từ điển do AI khởi tạo, học tập hoặc trích xuất từ văn phong mượt. Được chia thành các file riêng độc lập, không ảnh hưởng đến bộ từ điển gốc.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+                    {[
+                      { id: 'AiVietPhrase', name: 'AiVietPhrase.txt', label: 'AI VietPhrase' },
+                      { id: 'AiName', name: 'AiName.txt', label: 'AI Tên riêng (AiName)' },
+                      { id: 'AiPronouns', name: 'AiPronouns.txt', label: 'AI Đại từ (AiPronouns)' },
+                      { id: 'AiLuatNhan', name: 'AiLuatNhan.txt', label: 'AI Luật nhân (AiLuatNhan)' },
+                      { id: 'AiPhienAm', name: 'AiPhienAm.txt', label: 'AI Phiên âm (AiPhienAm)' },
+                      { id: 'AiDict', name: 'AiExtracted.txt', label: 'AI Extracted' },
+                    ].map((item) => (
+                      <div key={item.id} className="bg-slate-950/80 border border-amber-500/20 p-3 rounded-xl flex items-center justify-between">
+                        <div>
+                          <div className="font-bold text-amber-200 flex items-center gap-1">
+                            <Sparkles size={11} className="text-amber-400" />
+                            {item.label}
+                          </div>
+                          <div className="text-[10px] text-slate-500 font-mono mt-0.5">{item.name}</div>
+                          <div className="text-[10px] text-amber-400/80 font-semibold mt-0.5">
+                            {Number(stats.categories[item.id] || 0).toLocaleString('vi-VN')} từ
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleExportTxt(item.id)}
+                            className="p-1.5 bg-slate-900 hover:bg-slate-800 text-amber-300 rounded border border-slate-700"
+                            title={`Tải tệp ${item.name}`}
+                          >
+                            <Upload size={13} className="rotate-180 text-amber-400" />
+                          </button>
+                          <button
+                            onClick={() => handleClearCategory(item.id, item.label)}
+                            className="p-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-rose-400 rounded border border-slate-700"
+                            title={`Xóa dữ liệu ${item.label}`}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
                 {/* Quản lý các tệp từ điển gốc (VietPhrase, Name, Pronouns...) */}
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <BookOpen size={16} className="text-emerald-400" /> Xuất & Dọn dẹp Các Tệp Từ Điển Gốc
-                  </h3>
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <BookOpen size={16} className="text-emerald-400" /> Bộ Từ Điển Gốc (Standard)
+                    </h3>
+                    <button
+                      onClick={() => handleClearCategory(undefined, 'Toàn bộ từ điển Gốc', 'standard')}
+                      className="text-xs bg-slate-800 hover:bg-rose-950/50 hover:text-rose-300 text-slate-300 border border-slate-700 px-3 py-1 rounded-lg font-bold transition-all flex items-center gap-1.5"
+                    >
+                      <Trash2 size={13} /> Dọn dẹp toàn bộ bộ từ điển gốc
+                    </button>
+                  </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
                     {[
                       { id: 'VietPhrase', name: 'VietPhrase.txt', label: 'VietPhrase' },
@@ -1232,6 +1387,9 @@ export default function App() {
                         <div>
                           <div className="font-bold text-slate-200">{item.label}</div>
                           <div className="text-[10px] text-slate-500 font-mono mt-0.5">{item.name}</div>
+                          <div className="text-[10px] text-emerald-400/80 font-semibold mt-0.5">
+                            {Number(stats.categories[item.id] || 0).toLocaleString('vi-VN')} từ
+                          </div>
                         </div>
                         <div className="flex items-center gap-1">
                           <button
@@ -1266,12 +1424,21 @@ export default function App() {
                       className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none"
                     >
                       <option value="">Tất cả danh mục</option>
-                      <option value="AiDict">✨ Từ điển AI (AiExtracted.txt)</option>
-                      <option value="VietPhrase">VietPhrase</option>
-                      <option value="Name">Name</option>
-                      <option value="Pronouns">Pronouns</option>
-                      <option value="LuatNhan">LuatNhan</option>
-                      <option value="PhienAm">PhienAm</option>
+                      <optgroup label="✨ Bộ Từ Điển AI">
+                        <option value="AiDict">✨ AI Extracted (AiExtracted.txt)</option>
+                        <option value="AiVietPhrase">✨ AI VietPhrase (AiVietPhrase.txt)</option>
+                        <option value="AiName">✨ AI Name (AiName.txt)</option>
+                        <option value="AiPronouns">✨ AI Pronouns (AiPronouns.txt)</option>
+                        <option value="AiLuatNhan">✨ AI LuatNhan (AiLuatNhan.txt)</option>
+                        <option value="AiPhienAm">✨ AI PhienAm (AiPhienAm.txt)</option>
+                      </optgroup>
+                      <optgroup label="📚 Bộ Từ Điển Gốc">
+                        <option value="VietPhrase">VietPhrase</option>
+                        <option value="Name">Name</option>
+                        <option value="Pronouns">Pronouns</option>
+                        <option value="LuatNhan">LuatNhan</option>
+                        <option value="PhienAm">PhienAm</option>
+                      </optgroup>
                     </select>
                     <input
                       type="text"
@@ -1466,11 +1633,21 @@ export default function App() {
                   onChange={(e) => setExtractedCategory(e.target.value as any)}
                   className="bg-slate-900 border border-slate-700 text-amber-300 font-bold px-3 py-1.5 rounded-lg text-xs outline-none focus:border-amber-500"
                 >
-                  <option value="AiDict">✨ Từ Điển AI (Lưu riêng tệp AiExtracted.txt)</option>
-                  <option value="VietPhrase">VietPhrase (Cụm từ chung - VietPhrase.txt)</option>
-                  <option value="Name">Name (Tên riêng nhân vật / Địa danh - Name.txt)</option>
-                  <option value="Pronouns">Pronouns (Đại từ xưng hô - Pronouns.txt)</option>
-                  <option value="LuatNhan">LuatNhan (Luật nhân xưng hô - LuatNhan.txt)</option>
+                  <optgroup label="✨ Bộ Từ Điển AI">
+                    <option value="AiDict">✨ AI Extracted (Lưu riêng tệp AiExtracted.txt)</option>
+                    <option value="AiName">✨ AI Name (Tên riêng AI - AiName.txt)</option>
+                    <option value="AiPronouns">✨ AI Pronouns (Đại từ AI - AiPronouns.txt)</option>
+                    <option value="AiLuatNhan">✨ AI LuatNhan (Luật nhân AI - AiLuatNhan.txt)</option>
+                    <option value="AiVietPhrase">✨ AI VietPhrase (Cụm từ AI - AiVietPhrase.txt)</option>
+                    <option value="AiPhienAm">✨ AI PhienAm (Phiên âm AI - AiPhienAm.txt)</option>
+                  </optgroup>
+                  <optgroup label="📚 Bộ Từ Điển Gốc">
+                    <option value="VietPhrase">VietPhrase Gốc (VietPhrase.txt)</option>
+                    <option value="Name">Name Gốc (Name.txt)</option>
+                    <option value="Pronouns">Pronouns Gốc (Pronouns.txt)</option>
+                    <option value="LuatNhan">LuatNhan Gốc (LuatNhan.txt)</option>
+                    <option value="PhienAm">PhienAm Gốc (PhienAm.txt)</option>
+                  </optgroup>
                 </select>
               </div>
 
@@ -1491,7 +1668,16 @@ export default function App() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between text-slate-400 text-xs font-semibold px-1">
                     <span>Danh sách {extractedPairs.length} từ vựng đề xuất:</span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => {
+                          setExtractedPairs(prev => prev.map(p => p.checked ? { ...p, cat: extractedCategory } : p));
+                        }}
+                        className="bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all"
+                        title="Gán danh mục mặc định ở trên cho toàn bộ mục được tích chọn"
+                      >
+                        Áp dụng danh mục chính cho các mục chọn
+                      </button>
                       <button
                         onClick={() => setExtractedPairs(prev => prev.map(p => ({ ...p, checked: true })))}
                         className="text-amber-400 hover:underline text-[11px]"
@@ -1515,6 +1701,7 @@ export default function App() {
                           <th className="p-3 w-10 text-center">Lưu</th>
                           <th className="p-3">Từ tiếng Trung (ZH)</th>
                           <th className="p-3">Bản dịch tiếng Việt (VI)</th>
+                          <th className="p-3 w-40">Phân loại danh mục</th>
                           <th className="p-3 w-12 text-center">Xóa</th>
                         </tr>
                       </thead>
@@ -1556,6 +1743,33 @@ export default function App() {
                                 }}
                                 className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-medium text-xs outline-none focus:border-amber-500"
                               />
+                            </td>
+                            <td className="p-2">
+                              <select
+                                value={pair.cat || 'AiDict'}
+                                onChange={(e) => {
+                                  const updated = [...extractedPairs];
+                                  updated[idx].cat = e.target.value;
+                                  setExtractedPairs(updated);
+                                }}
+                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-amber-300 font-semibold text-[11px] outline-none focus:border-amber-500"
+                              >
+                                <optgroup label="✨ Bộ Từ Điển AI">
+                                  <option value="AiName">✨ AI Name (Tên riêng)</option>
+                                  <option value="AiPronouns">✨ AI Pronouns (Đại từ)</option>
+                                  <option value="AiLuatNhan">✨ AI LuatNhan (Luật nhân)</option>
+                                  <option value="AiVietPhrase">✨ AI VietPhrase (Cụm từ AI)</option>
+                                  <option value="AiPhienAm">✨ AI PhienAm (Phiên âm)</option>
+                                  <option value="AiDict">✨ AI Extracted (Tổng hợp)</option>
+                                </optgroup>
+                                <optgroup label="📚 Bộ Từ Điển Gốc">
+                                  <option value="VietPhrase">VietPhrase Gốc</option>
+                                  <option value="Name">Name Gốc</option>
+                                  <option value="Pronouns">Pronouns Gốc</option>
+                                  <option value="LuatNhan">LuatNhan Gốc</option>
+                                  <option value="PhienAm">PhienAm Gốc</option>
+                                </optgroup>
+                              </select>
                             </td>
                             <td className="p-2 text-center">
                               <button
