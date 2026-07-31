@@ -150,3 +150,11 @@
 重=nặng|lại
 以=để
 就=liền
+三只=ba con
+饮料中=trong đồ uống
+重要=đổi lại|gọi lại|trọng yếu
+重了一杯=đổi lại một ly|gọi lại một cốc
+可行性报告=báo cáo tính khả thi
+喝下去=uống xuống|uống vào
+一把抓出=một tay tóm ra|liền tóm ra
+抓出苍蝇=tóm con ruồi ra

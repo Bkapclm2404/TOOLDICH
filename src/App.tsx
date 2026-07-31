@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Server, Settings, Terminal, RefreshCw, Upload, Check, Copy, Link as LinkIcon, BookOpen, AlertCircle, GitBranch, GitPullRequest, HelpCircle, ExternalLink, X } from 'lucide-react';
+import { Server, Settings, Terminal, RefreshCw, Upload, Check, Copy, Link as LinkIcon, BookOpen, AlertCircle, GitBranch, GitPullRequest, HelpCircle, ExternalLink, X, Pause, Play, Square, Zap, Trash2, Sparkles, Sliders, Layers, Type, Hash, Plus, Loader2 } from 'lucide-react';
 
 export default function App() {
   // --- STATE ---
   const [apiBaseUrl, setApiBaseUrl] = useState<string>('https://muster-okay-unpaired.ngrok-free.dev');
-  const [useExternalApi, setUseExternalApi] = useState<boolean>(true);
+  const [useExternalApi, setUseExternalApi] = useState<boolean>(false);
   const [isConfiguringApi, setIsConfiguringApi] = useState(false);
   const [isGitModalOpen, setIsGitModalOpen] = useState(false);
   const [isGitPulling, setIsGitPulling] = useState(false);
@@ -31,6 +31,15 @@ export default function App() {
   const [sourceText, setSourceText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
+  const [autoTranslate, setAutoTranslate] = useState<boolean>(true);
+  const [translationEngine, setTranslationEngine] = useState<'gemini' | 'vietphrase'>('gemini');
+  const [segmentationMode, setSegmentationMode] = useState<'paragraph' | 'sentence'>('paragraph');
+  const [maxPhraseLength, setMaxPhraseLength] = useState<number>(16);
+  const [isPaused, setIsPaused] = useState<boolean>(false);
+  const isPausedRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const [translateProgress, setTranslateProgress] = useState<{ current: number; total: number } | null>(null);
+  const [translationStatus, setTranslationStatus] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'translate' | 'dictionary'>('translate');
 
@@ -39,6 +48,26 @@ export default function App() {
   const [searchCategory, setSearchCategory] = useState('');
   const [searchResults, setSearchResults] = useState<Array<{ zh: string; vi: string; cat: string }>>([]);
   const [isSearching, setIsSearching] = useState(false);
+
+  // AI Dictionary Extraction Modal State
+  const [isExtractModalOpen, setIsExtractModalOpen] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractedCategory, setExtractedCategory] = useState<'Name' | 'Pronouns' | 'LuatNhan' | 'VietPhrase' | 'AiDict'>('AiDict');
+  const [extractedPairs, setExtractedPairs] = useState<Array<{ zh: string; vi: string; checked: boolean }>>([]);
+  const [extractStatus, setExtractStatus] = useState<string | null>(null);
+
+  // AI Server & Proxy Configuration State
+  const [activeAiModel, setActiveAiModel] = useState<string>('gemini-flash-latest');
+  const [hasAiApiKey, setHasAiApiKey] = useState<boolean>(false);
+  const [aiProxyUrl, setAiProxyUrl] = useState<string>('');
+  const [customApiKeyInput, setCustomApiKeyInput] = useState<string>('');
+  const [selectedModelInput, setSelectedModelInput] = useState<string>('gemini-flash-latest');
+  const [proxyUrlInput, setProxyUrlInput] = useState<string>('');
+  const [isSavingAiConfig, setIsSavingAiConfig] = useState(false);
+  const [aiConfigMessage, setAiConfigMessage] = useState<string | null>(null);
+
+  // Dictionary Group Filter
+  const [dictGroupFilter, setDictGroupFilter] = useState<'all' | 'standard' | 'ai'>('all');
 
   // --- API HELPER ---
   const getEndpoint = (path: string) => {
@@ -52,7 +81,30 @@ export default function App() {
   // --- EFFECTS ---
   useEffect(() => {
     fetchStats();
+    fetchAiConfig();
   }, [apiBaseUrl, useExternalApi]);
+
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
+  // Tự động dịch khi nhập hoặc dán văn bản (nếu bật Auto Translate)
+  useEffect(() => {
+    if (!autoTranslate) return;
+
+    if (!sourceText.trim()) {
+      setTranslatedText('');
+      setTranslateProgress(null);
+      setTranslationStatus(null);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      handleTranslate();
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [sourceText, autoTranslate, translationEngine, segmentationMode, maxPhraseLength, apiBaseUrl, useExternalApi]);
 
   // --- METHODS ---
   const fetchStats = async () => {
@@ -72,6 +124,9 @@ export default function App() {
           dir: data.dictDirectoryPath || './dictionaries',
           categories: data.stats || {},
         });
+        if (data.activeAiModel) setActiveAiModel(data.activeAiModel);
+        if (typeof data.hasAiApiKey === 'boolean') setHasAiApiKey(data.hasAiApiKey);
+        if (typeof data.aiProxyUrl === 'string') setAiProxyUrl(data.aiProxyUrl);
         setServerStatus('connected');
       } else {
         setServerStatus('disconnected');
@@ -84,30 +139,271 @@ export default function App() {
     }
   };
 
-  const handleTranslate = async () => {
-    if (!sourceText.trim()) return;
-    setIsTranslating(true);
+  const fetchAiConfig = async () => {
     try {
-      const res = await fetch(getEndpoint('/api/translate-text'), {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'ngrok-skip-browser-warning': 'true'
-        },
-        body: JSON.stringify({ text: sourceText }),
+      const res = await fetch(getEndpoint('/api/ai/config'), {
+        headers: { 'ngrok-skip-browser-warning': 'true' }
       });
       if (res.ok) {
         const data = await res.json();
-        setTranslatedText(data.translated || data.translatedText || '');
-      } else {
-        setTranslatedText('Lỗi dịch thuật: ' + res.statusText);
+        setActiveAiModel(data.activeModel || 'gemini-flash-latest');
+        setHasAiApiKey(!!data.hasApiKey);
+        setAiProxyUrl(data.proxyUrl || '');
+        setSelectedModelInput(data.activeModel || 'gemini-flash-latest');
+        setProxyUrlInput(data.proxyUrl || '');
       }
     } catch (err) {
       console.error(err);
-      setTranslatedText('Lỗi kết nối máy chủ.');
+    }
+  };
+
+  const handleSaveAiConfig = async () => {
+    setIsSavingAiConfig(true);
+    setAiConfigMessage(null);
+    try {
+      const res = await fetch(getEndpoint('/api/ai/config'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
+        body: JSON.stringify({
+          activeModel: selectedModelInput,
+          customKey: customApiKeyInput,
+          proxyUrl: proxyUrlInput,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setActiveAiModel(data.activeModel);
+        setHasAiApiKey(data.hasApiKey);
+        setAiProxyUrl(data.proxyUrl);
+        setAiConfigMessage("Đã lưu cấu hình AI máy chủ thành công!");
+        fetchStats();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setAiConfigMessage(`Lỗi: ${err.error || res.statusText}`);
+      }
+    } catch (err: any) {
+      setAiConfigMessage("Không thể kết nối máy chủ để lưu cấu hình AI.");
+    } finally {
+      setIsSavingAiConfig(false);
+    }
+  };
+
+  const handleTranslate = async (overrideEngine?: 'gemini' | 'vietphrase') => {
+    if (!sourceText.trim()) return;
+
+    const engineToUse = overrideEngine || translationEngine;
+    if (overrideEngine) {
+      setTranslationEngine(overrideEngine);
+    }
+
+    // Hủy yêu cầu đang chạy nếu có
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    setIsTranslating(true);
+    setIsPaused(false);
+    isPausedRef.current = false;
+    setTranslationStatus(engineToUse === 'gemini' ? 'Đang gọi AI Gemini dịch mượt...' : 'Đang dịch nhanh bằng bộ từ điển...');
+
+    // Chia nhỏ văn bản theo cài đặt phân đoạn (đoạn văn hoặc theo câu)
+    let units: string[] = [];
+    if (segmentationMode === 'sentence') {
+      const matches = sourceText.match(/[^。！？.!?\r\n]+[。！？.!?\r\n]*|\r?\n+/g);
+      units = matches ? matches : [sourceText];
+    } else {
+      units = sourceText.split(/\r?\n/);
+    }
+
+    const CHUNK_SIZE = segmentationMode === 'sentence' ? 20 : 15;
+    const chunks: string[] = [];
+
+    for (let i = 0; i < units.length; i += CHUNK_SIZE) {
+      const joinDelim = segmentationMode === 'sentence' ? '' : '\n';
+      chunks.push(units.slice(i, i + CHUNK_SIZE).join(joinDelim));
+    }
+
+    let fullTranslated = '';
+    setTranslateProgress({ current: 0, total: chunks.length });
+
+    try {
+      for (let index = 0; index < chunks.length; index++) {
+        if (controller.signal.aborted) break;
+
+        const unitLabel = segmentationMode === 'sentence' ? 'câu' : 'đoạn';
+
+        // Xử lý trạng thái tạm dừng: chờ nếu người dùng nhấn Tạm dừng
+        while (isPausedRef.current && !controller.signal.aborted) {
+          setTranslationStatus(`Đã tạm dừng (Đã dịch ${index}/${chunks.length} ${unitLabel})`);
+          await new Promise((res) => setTimeout(res, 250));
+        }
+
+        if (controller.signal.aborted) break;
+
+        setTranslationStatus(`Đang dịch ${unitLabel} ${index + 1}/${chunks.length} (${engineToUse === 'gemini' ? 'AI Gemini' : 'Từ điển'})...`);
+        const chunk = chunks[index];
+
+        if (!chunk.trim()) {
+          const joinDelim = segmentationMode === 'sentence' ? '' : '\n';
+          fullTranslated += (index > 0 ? joinDelim : '') + chunk;
+          setTranslatedText(fullTranslated);
+          setTranslateProgress({ current: index + 1, total: chunks.length });
+          continue;
+        }
+
+        const res = await fetch(getEndpoint('/api/translate-text'), {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          },
+          body: JSON.stringify({ 
+            text: chunk, 
+            engine: engineToUse,
+            maxPhraseLength: maxPhraseLength,
+          }),
+          signal: controller.signal,
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const chunkResult = data.translated || data.translatedText || '';
+          const joinDelim = segmentationMode === 'sentence' ? '' : '\n';
+          fullTranslated += (index > 0 ? joinDelim : '') + chunkResult;
+          setTranslatedText(fullTranslated);
+          setTranslateProgress({ current: index + 1, total: chunks.length });
+          if (data.fallbackNotice) {
+            setTranslationStatus(`⚠️ ${data.fallbackNotice}`);
+          }
+        } else {
+          const joinDelim = segmentationMode === 'sentence' ? '' : '\n';
+          fullTranslated += (index > 0 ? joinDelim : '') + `[Lỗi dịch ${unitLabel} ${index + 1}: ${res.statusText}]`;
+          setTranslatedText(fullTranslated);
+        }
+      }
+
+      if (!controller.signal.aborted) {
+        setTranslationStatus('Dịch hoàn tất!');
+        setTimeout(() => setTranslationStatus(null), 3000);
+      }
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        setTranslationStatus('Đã dừng dịch thuật.');
+      } else {
+        console.error(err);
+        setTranslationStatus('Lỗi kết nối máy chủ.');
+        setTranslatedText((prev) => prev ? prev + '\n[Lỗi kết nối máy chủ]' : 'Lỗi kết nối máy chủ.');
+      }
     } finally {
       setIsTranslating(false);
+      setIsPaused(false);
+      isPausedRef.current = false;
+      abortControllerRef.current = null;
     }
+  };
+
+  const handleStartExtractFromAi = async () => {
+    if (!sourceText.trim() || !translatedText.trim()) {
+      alert("Vui lòng dán văn bản gốc và thực hiện dịch mượt AI trước khi trích xuất từ điển.");
+      return;
+    }
+    setIsExtractModalOpen(true);
+    setIsExtracting(true);
+    setExtractStatus("Gemini AI đang so sánh văn bản gốc tiếng Trung và bản dịch mượt tiếng Việt để trích xuất từ vựng, tên nhân vật, cụm từ...");
+    setExtractedPairs([]);
+
+    try {
+      const res = await fetch(getEndpoint('/api/dictionary/extract-from-ai'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
+        body: JSON.stringify({
+          sourceText,
+          translatedText,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.pairs && Array.isArray(data.pairs) && data.pairs.length > 0) {
+          setExtractedPairs(data.pairs.map((p: any) => ({ zh: p.zh, vi: p.vi, checked: true })));
+          setExtractStatus(`Đã trích xuất thành công ${data.pairs.length} từ vựng/tên riêng từ bản dịch AI!`);
+        } else {
+          setExtractStatus("Không tìm thấy cụm từ/tên riêng mới nào trong đoạn văn bản này.");
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setExtractStatus(`Lỗi trích xuất: ${errData.error || res.statusText}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setExtractStatus("Lỗi kết nối máy chủ khi trích xuất từ điển.");
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  const handleSaveExtractedPairs = async () => {
+    const selectedEntries = extractedPairs
+      .filter(p => p.checked && p.zh.trim() && p.vi.trim())
+      .map(p => ({ zh: p.zh.trim(), vi: p.vi.trim() }));
+
+    if (selectedEntries.length === 0) {
+      alert("Vui lòng chọn ít nhất 1 cặp từ vựng để lưu.");
+      return;
+    }
+
+    try {
+      setExtractStatus("Đang lưu các từ vựng vào bộ từ điển máy chủ...");
+      const res = await fetch(getEndpoint('/api/dictionary/add-entries'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
+        body: JSON.stringify({
+          category: extractedCategory,
+          entries: selectedEntries,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Đã lưu thành công ${selectedEntries.length} từ vựng vào danh mục [${extractedCategory}]!`);
+        setIsExtractModalOpen(false);
+        fetchStats();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`Lỗi lưu từ điển: ${err.error || res.statusText}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert("Lỗi kết nối máy chủ khi lưu từ điển.");
+    }
+  };
+
+  const handlePauseToggle = () => {
+    setIsPaused((prev) => !prev);
+  };
+
+  const handleStopTranslate = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsTranslating(false);
+    setIsPaused(false);
+    isPausedRef.current = false;
+    setTranslationStatus('Đã dừng dịch.');
   };
 
   const handleSearchEntries = async () => {
@@ -129,6 +425,31 @@ export default function App() {
       console.error(err);
     } finally {
       setIsSearching(false);
+    }
+  };
+
+  const handleExportTxt = (category: string) => {
+    const url = getEndpoint(`/api/dictionary/export-txt?category=${encodeURIComponent(category)}`);
+    window.open(url, '_blank');
+  };
+
+  const handleClearCategory = async (category: string, catName: string) => {
+    if (!confirm(`Bạn có chắc chắn muốn xóa toàn bộ dữ liệu từ điển [${catName}] trên máy chủ?`)) return;
+    try {
+      const res = await fetch(getEndpoint('/api/dictionary/clear'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
+        body: JSON.stringify({ category }),
+      });
+      if (res.ok) {
+        fetchStats();
+        setSearchResults([]);
+      }
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -201,6 +522,12 @@ export default function App() {
         </div>
         
         <div className="flex items-center gap-3">
+          {/* Badge Loại AI Model */}
+          <div className="hidden sm:flex items-center gap-1.5 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-full text-xs font-bold text-amber-300" title="Model AI hiện tại trên máy chủ">
+            <Sparkles size={13} className="text-amber-400 fill-amber-400/30" />
+            <span>AI Model: {activeAiModel}</span>
+          </div>
+
           <button
             onClick={handleGitPull}
             disabled={isGitPulling}
@@ -300,6 +627,78 @@ export default function App() {
               </div>
             </div>
 
+            {/* AI Model & Proxy Settings Block */}
+            <div className="p-5 border-b border-slate-800/80 bg-slate-950/40 space-y-4">
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Sparkles size={16} className="text-amber-400" /> Cấu Hình AI & Proxy
+              </h2>
+
+              <div className="space-y-3 text-xs">
+                {/* Chọn Model AI */}
+                <div>
+                  <label className="text-slate-400 font-semibold block mb-1">Loại Model AI Máy Chủ:</label>
+                  <select
+                    value={selectedModelInput}
+                    onChange={(e) => setSelectedModelInput(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 font-semibold outline-none focus:border-amber-500"
+                  >
+                    <option value="gemini-flash-latest">gemini-flash-latest (Khuyên dùng)</option>
+                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                    <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Cao cấp)</option>
+                    <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Siêu nhẹ)</option>
+                  </select>
+                </div>
+
+                {/* Máy Chủ Proxy AI Trung Gian */}
+                <div>
+                  <label className="text-slate-400 font-semibold block mb-1">Máy Chủ Proxy Trung Gian (Tùy chọn):</label>
+                  <input
+                    type="text"
+                    value={proxyUrlInput}
+                    onChange={(e) => setProxyUrlInput(e.target.value)}
+                    placeholder="Ví dụ: https://my-ai-proxy.com/v1beta"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 text-xs outline-none focus:border-amber-500"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Nhập base URL proxy nếu bạn muốn gọi AI qua gateway/proxy trung gian.
+                  </p>
+                </div>
+
+                {/* Custom Gemini API Key */}
+                <div>
+                  <label className="text-slate-400 font-semibold block mb-1">Custom Gemini API Key (Tùy chọn):</label>
+                  <input
+                    type="password"
+                    value={customApiKeyInput}
+                    onChange={(e) => setCustomApiKeyInput(e.target.value)}
+                    placeholder="Dán Gemini API Key của bạn..."
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 text-xs outline-none focus:border-amber-500"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Trạng thái key: {hasAiApiKey ? <span className="text-emerald-400 font-bold">Đã thiết lập Key</span> : <span className="text-amber-400 font-bold">Chưa có Key</span>}
+                  </p>
+                </div>
+
+                {/* Button Save AI Config */}
+                <button
+                  onClick={handleSaveAiConfig}
+                  disabled={isSavingAiConfig}
+                  className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold py-2 rounded-md transition-all shadow flex items-center justify-center gap-2"
+                >
+                  {isSavingAiConfig ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                  <span>Lưu Cấu Hình AI</span>
+                </button>
+
+                {aiConfigMessage && (
+                  <div className={`p-2 rounded text-[11px] font-medium text-center border ${
+                    aiConfigMessage.includes('Lỗi') ? 'bg-rose-950/60 border-rose-800 text-rose-300' : 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+                  }`}>
+                    {aiConfigMessage}
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div className="p-5 flex-1 space-y-6">
               <div>
                 <h2 className="text-sm font-bold text-white flex items-center gap-2 mb-4">
@@ -338,11 +737,12 @@ export default function App() {
                     onChange={(e) => setUploadCategory(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 outline-none focus:border-pink-500 transition-colors"
                   >
-                    <option value="VietPhrase">VietPhrase</option>
-                    <option value="Name">Name</option>
-                    <option value="Pronouns">Pronouns</option>
-                    <option value="LuatNhan">LuatNhan</option>
-                    <option value="PhienAm">PhienAm</option>
+                    <option value="AiDict">✨ Từ điển AI (AiExtracted.txt)</option>
+                    <option value="VietPhrase">VietPhrase (VietPhrase.txt)</option>
+                    <option value="Name">Name (Name.txt)</option>
+                    <option value="Pronouns">Pronouns (Pronouns.txt)</option>
+                    <option value="LuatNhan">LuatNhan (LuatNhan.txt)</option>
+                    <option value="PhienAm">PhienAm (PhienAm.txt)</option>
                   </select>
                   
                   <input
@@ -401,22 +801,175 @@ export default function App() {
           <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
             {activeTab === 'translate' && (
               <div className="h-full flex flex-col">
+
+                {/* Engine Selector Bar */}
+                <div className="mb-3 bg-slate-900 border border-slate-800 p-3 rounded-xl flex flex-wrap items-center justify-between gap-3 shadow-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Chế độ dịch:</span>
+                    <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800">
+                      <button
+                        onClick={() => setTranslationEngine('gemini')}
+                        className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 ${
+                          translationEngine === 'gemini'
+                            ? 'bg-emerald-600 text-white shadow-md'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <Sparkles size={14} className={translationEngine === 'gemini' ? 'text-amber-300 fill-amber-300/30' : 'text-slate-500'} />
+                        AI Gemini (Văn phong mượt)
+                      </button>
+                      <button
+                        onClick={() => setTranslationEngine('vietphrase')}
+                        className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 ${
+                          translationEngine === 'vietphrase'
+                            ? 'bg-emerald-600 text-white shadow-md'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <BookOpen size={14} />
+                        Từ điển VietPhrase (Hán Việt thô)
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="text-[11px] text-slate-400 font-medium flex items-center gap-1">
+                    {translationEngine === 'gemini' ? (
+                      <span className="text-emerald-400 flex items-center gap-1">
+                        ✨ Dịch AI hiểu ngữ cảnh, thoát ý, câu thoại sinh động mượt mà như tác phẩm thật.
+                      </span>
+                    ) : (
+                      <span className="text-slate-400">
+                        📚 Dịch từ điển ghép từ Hán-Việt thô, phù hợp cho file dữ liệu/thông số game.
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Advanced Settings Bar: Phân đoạn dịch & Cụm từ dài nhất */}
+                <div className="mb-4 bg-slate-900/80 border border-slate-800/80 p-3 rounded-xl flex flex-wrap items-center justify-between gap-4 shadow-sm">
+                  {/* Phân đoạn dịch */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                      <Layers size={13} className="text-emerald-400" />
+                      Phân đoạn dịch:
+                    </span>
+                    <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800">
+                      <button
+                        onClick={() => setSegmentationMode('paragraph')}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all flex items-center gap-1 ${
+                          segmentationMode === 'paragraph'
+                            ? 'bg-slate-800 text-emerald-400 font-bold border border-slate-700 shadow-sm'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <Type size={12} />
+                        Theo đoạn văn
+                      </button>
+                      <button
+                        onClick={() => setSegmentationMode('sentence')}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all flex items-center gap-1 ${
+                          segmentationMode === 'sentence'
+                            ? 'bg-slate-800 text-emerald-400 font-bold border border-slate-700 shadow-sm'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <Sliders size={12} />
+                        Theo câu
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Cụm từ dịch dài nhất */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1" title="Độ dài cụm từ tối đa khi tra từ điển VietPhrase">
+                      <Hash size={13} className="text-indigo-400" />
+                      Cụm từ dịch dài nhất:
+                    </span>
+                    <div className="flex items-center gap-1 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800">
+                      {[8, 12, 16, 20].map((len) => (
+                        <button
+                          key={len}
+                          onClick={() => setMaxPhraseLength(len)}
+                          className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
+                            maxPhraseLength === len
+                              ? 'bg-indigo-600 text-white shadow'
+                              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                          }`}
+                        >
+                          {len}
+                        </button>
+                      ))}
+                      <div className="h-3 w-px bg-slate-800 mx-1"></div>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={maxPhraseLength}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          if (!isNaN(val) && val > 0) {
+                            setMaxPhraseLength(val);
+                          } else if (e.target.value === '') {
+                            setMaxPhraseLength(16);
+                          }
+                        }}
+                        className="w-12 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-center font-bold text-indigo-300 outline-none focus:border-indigo-500"
+                        title="Tùy chỉnh số ký tự cụm từ dài nhất"
+                      />
+                      <span className="text-[10px] text-slate-500 font-medium">ký tự</span>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 min-h-0">
                   
                   {/* Source Area */}
                   <div className="flex flex-col border border-slate-800 rounded-xl bg-slate-900 shadow-sm overflow-hidden focus-within:border-emerald-500/50 transition-colors">
-                    <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
-                      <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Chinese (Source)</span>
-                      {sourceText.length > 0 && (
-                        <span className="text-[10px] font-semibold text-slate-500 bg-slate-800 px-2 py-0.5 rounded-full">
-                          {sourceText.length} chars
-                        </span>
-                      )}
+                    <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Chinese (Source)</span>
+                        {sourceText.length > 0 && (
+                          <span className="text-[10px] font-semibold text-slate-500 bg-slate-800 px-2 py-0.5 rounded-full">
+                            {sourceText.length} ký tự
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        {/* Toggle Auto Translate */}
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs font-medium text-slate-300 hover:text-white transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={autoTranslate}
+                            onChange={(e) => setAutoTranslate(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-8 h-4 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500 relative"></div>
+                          <span className="flex items-center gap-1 text-[11px] font-semibold">
+                            <Zap size={12} className={autoTranslate ? 'text-emerald-400 fill-emerald-400/20' : 'text-slate-500'} />
+                            Tự động dịch
+                          </span>
+                        </label>
+
+                        {sourceText && (
+                          <button
+                            onClick={() => {
+                              setSourceText('');
+                              setTranslatedText('');
+                              handleStopTranslate();
+                            }}
+                            className="text-slate-500 hover:text-rose-400 transition-colors p-1 rounded"
+                            title="Xóa văn bản gốc"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <textarea
                       value={sourceText}
                       onChange={(e) => setSourceText(e.target.value)}
-                      placeholder="Paste Chinese text here..."
+                      placeholder="Dán hoặc nhập văn bản tiếng Trung vào đây..."
                       className="flex-1 bg-transparent p-4 text-slate-200 outline-none resize-none leading-relaxed text-[15px]"
                     />
                   </div>
@@ -424,20 +977,42 @@ export default function App() {
                   {/* Target Area */}
                   <div className="flex flex-col border border-slate-800 rounded-xl bg-slate-900 shadow-sm overflow-hidden">
                     <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
-                      <span className="text-xs font-bold text-emerald-500 uppercase tracking-widest">Vietnamese (VietPhrase)</span>
+                      <span className="text-xs font-bold text-emerald-400 uppercase tracking-widest flex items-center gap-1.5">
+                        {translationEngine === 'gemini' ? (
+                          <>
+                            <Sparkles size={13} className="text-amber-300" />
+                            Vietnamese (AI Gemini - Dịch Mượt)
+                          </>
+                        ) : (
+                          <>
+                            <BookOpen size={13} />
+                            Vietnamese (VietPhrase - Từ Điển)
+                          </>
+                        )}
+                      </span>
                       {translatedText && (
-                        <button 
-                          onClick={() => navigator.clipboard.writeText(translatedText)}
-                          className="text-slate-500 hover:text-emerald-400 transition-colors flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider"
-                        >
-                          <Copy size={12} /> Copy
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={handleStartExtractFromAi}
+                            className="text-amber-400 hover:text-amber-300 transition-colors flex items-center gap-1.5 text-[11px] font-bold bg-amber-950/40 border border-amber-800/60 px-2.5 py-1 rounded-md shadow-sm"
+                            title="Tạo bộ từ điển mới từ bản dịch mượt AI"
+                          >
+                            <Sparkles size={13} className="text-amber-300" />
+                            Tạo từ điển từ AI
+                          </button>
+                          <button 
+                            onClick={() => navigator.clipboard.writeText(translatedText)}
+                            className="text-slate-500 hover:text-emerald-400 transition-colors flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider pl-1"
+                          >
+                            <Copy size={12} /> Sao chép
+                          </button>
+                        </div>
                       )}
                     </div>
                     <textarea
                       value={translatedText}
                       readOnly
-                      placeholder="Translation will appear here..."
+                      placeholder="Bản dịch tiếng Việt sẽ xuất hiện ở đây..."
                       className="flex-1 bg-transparent p-4 text-slate-200 outline-none resize-none leading-relaxed text-[15px]"
                     />
                   </div>
@@ -445,49 +1020,221 @@ export default function App() {
                 </div>
 
                 {/* Action Bar */}
-                <div className="mt-6 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3 flex-wrap">
                     {serverStatus === 'disconnected' && (
                       <span className="text-xs text-rose-400 flex items-center gap-1.5 bg-rose-950/30 px-3 py-1.5 rounded-md border border-rose-900/50">
-                        <AlertCircle size={14} /> Server Offline
+                        <AlertCircle size={14} /> Máy chủ ngắt kết nối
                       </span>
                     )}
+
+                    {translationStatus && (
+                      <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg text-xs font-semibold">
+                        {isTranslating ? (
+                          isPaused ? (
+                            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                          ) : (
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                          )
+                        ) : (
+                          <span className="w-2 h-2 rounded-full bg-indigo-400"></span>
+                        )}
+                        <span className={isPaused ? 'text-amber-300' : isTranslating ? 'text-emerald-300' : 'text-slate-300'}>
+                          {translationStatus}
+                        </span>
+                      </div>
+                    )}
+
+                    {translateProgress && isTranslating && (
+                      <div className="flex items-center gap-2 bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-800">
+                        <div className="w-20 sm:w-28 bg-slate-800 rounded-full h-2 overflow-hidden border border-slate-700">
+                          <div 
+                            className={`h-full transition-all duration-300 ${isPaused ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                            style={{ width: `${Math.round((translateProgress.current / translateProgress.total) * 100)}%` }}
+                          ></div>
+                        </div>
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          {Math.round((translateProgress.current / translateProgress.total) * 100)}%
+                        </span>
+                      </div>
+                    )}
                   </div>
-                  <button
-                    onClick={handleTranslate}
-                    disabled={isTranslating || !sourceText.trim() || serverStatus === 'disconnected'}
-                    className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 disabled:cursor-not-allowed text-white px-8 py-3 rounded-lg text-sm font-bold shadow-lg shadow-emerald-900/20 transition-all flex items-center gap-2 transform active:scale-[0.98]"
-                  >
+
+                  <div className="flex items-center gap-2.5 flex-wrap justify-end">
                     {isTranslating ? (
                       <>
-                        <RefreshCw size={18} className="animate-spin" /> Translating...
+                        {/* Nút Tạm dừng / Tiếp tục */}
+                        <button
+                          onClick={handlePauseToggle}
+                          className={`px-5 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2 border shadow-lg ${
+                            isPaused
+                              ? 'bg-amber-600 hover:bg-amber-500 text-white border-amber-500 shadow-amber-950/30'
+                              : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-amber-500/30'
+                          }`}
+                        >
+                          {isPaused ? (
+                            <>
+                              <Play size={16} className="fill-current" /> Tiếp tục dịch
+                            </>
+                          ) : (
+                            <>
+                              <Pause size={16} className="fill-current" /> Tạm dừng
+                            </>
+                          )}
+                        </button>
+
+                        {/* Nút Dừng dịch */}
+                        <button
+                          onClick={handleStopTranslate}
+                          className="bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40 px-5 py-2.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-rose-950/30"
+                        >
+                          <Square size={16} className="fill-current" /> Dừng dịch
+                        </button>
                       </>
                     ) : (
                       <>
-                        <Terminal size={18} /> Translate Now
+                        {/* Nút Dịch mượt bằng AI Gemini */}
+                        <button
+                          onClick={() => handleTranslate('gemini')}
+                          disabled={!sourceText.trim() || serverStatus === 'disconnected'}
+                          className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-emerald-900/20 transition-all flex items-center gap-2 transform active:scale-[0.98]"
+                          title="Dịch thông minh, mượt mà và thoát ý bằng AI Gemini"
+                        >
+                          <Sparkles size={16} className="text-amber-300" /> ✨ Dịch mượt (AI)
+                        </button>
+
+                        {/* Nút Dịch nhanh bằng Từ điển (Không dùng AI) */}
+                        <button
+                          onClick={() => handleTranslate('vietphrase')}
+                          disabled={!sourceText.trim() || serverStatus === 'disconnected'}
+                          className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:hover:bg-indigo-600 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-indigo-900/20 transition-all flex items-center gap-2 transform active:scale-[0.98]"
+                          title="Dịch cực nhanh trực tiếp bằng kho từ điển máy chủ (Không tốn AI)"
+                        >
+                          <BookOpen size={16} /> ⚡ Dịch nhanh (Bộ Từ Điển)
+                        </button>
+
+                        {/* Nút Trích xuất từ điển từ AI */}
+                        {sourceText.trim() && translatedText.trim() && (
+                          <button
+                            onClick={handleStartExtractFromAi}
+                            className="bg-amber-600 hover:bg-amber-500 text-white px-4 py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-amber-950/30 transition-all flex items-center gap-2 transform active:scale-[0.98]"
+                            title="Tự động trích xuất các tên riêng và cụm từ mới từ bản dịch AI vào bộ từ điển"
+                          >
+                            <Plus size={16} /> 📖 Trích xuất Từ điển từ AI
+                          </button>
+                        )}
                       </>
                     )}
-                  </button>
+                  </div>
                 </div>
               </div>
             )}
             
             {activeTab === 'dictionary' && (
               <div className="space-y-6 max-w-4xl">
+                
                 {/* Stats cards */}
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
                   {Object.entries(stats.categories).map(([cat, count]) => (
-                    <div key={cat} className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
-                      <div className="text-xs text-slate-400 font-medium">{cat}</div>
+                    <div 
+                      key={cat} 
+                      className={`p-3 rounded-xl border transition-all ${
+                        cat === 'AiDict' 
+                          ? 'bg-amber-950/20 border-amber-500/40 shadow-sm' 
+                          : 'bg-slate-900 border-slate-800'
+                      }`}
+                    >
+                      <div className={`text-xs font-semibold flex items-center gap-1 ${cat === 'AiDict' ? 'text-amber-400' : 'text-slate-400'}`}>
+                        {cat === 'AiDict' && <Sparkles size={12} className="text-amber-400" />}
+                        {cat === 'AiDict' ? 'TĐ AI (Extracted)' : cat}
+                      </div>
                       <div className="text-lg font-bold text-white mt-1">{Number(count).toLocaleString('vi-VN')}</div>
                     </div>
                   ))}
                 </div>
 
-                {/* Dictionary Search */}
-                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+                {/* Khối quản lý riêng bộ từ điển trích xuất từ AI (AiExtracted.txt) */}
+                <div className="bg-amber-950/20 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-amber-500/20 border border-amber-500/30 rounded-xl">
+                        <Sparkles className="text-amber-300" size={20} />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-amber-200 flex items-center gap-2">
+                          Bộ Từ Điển AI (`AiExtracted.txt`)
+                          <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full border border-amber-500/30 font-mono">
+                            {Number(stats.categories['AiDict'] || 0).toLocaleString('vi-VN')} từ vựng
+                          </span>
+                        </h3>
+                        <p className="text-xs text-amber-300/70 mt-0.5">
+                          Tách riêng hoàn toàn tệp từ điển do AI tự động tổng hợp từ bản dịch mượt. Không đè lên VietPhrase gốc.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 self-end sm:self-center">
+                      <button
+                        onClick={() => handleExportTxt('AiDict')}
+                        className="bg-amber-600/30 hover:bg-amber-600/40 text-amber-200 border border-amber-500/40 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+                        title="Tải tệp AiExtracted.txt về máy"
+                      >
+                        <Upload size={14} className="rotate-180" /> Tải tệp AiExtracted.txt
+                      </button>
+                      <button
+                        onClick={() => handleClearCategory('AiDict', 'Từ điển AI (AiExtracted.txt)')}
+                        className="bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+                        title="Xóa riêng bộ từ điển AI trích xuất"
+                      >
+                        <Trash2 size={14} /> Dọn tệp AI
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Quản lý các tệp từ điển gốc (VietPhrase, Name, Pronouns...) */}
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    Tra cứu Từ điển ({stats.total.toLocaleString('vi-VN')} từ)
+                    <BookOpen size={16} className="text-emerald-400" /> Xuất & Dọn dẹp Các Tệp Từ Điển Gốc
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+                    {[
+                      { id: 'VietPhrase', name: 'VietPhrase.txt', label: 'VietPhrase' },
+                      { id: 'Name', name: 'Name.txt', label: 'Tên riêng (Name)' },
+                      { id: 'Pronouns', name: 'Pronouns.txt', label: 'Đại từ (Pronouns)' },
+                      { id: 'LuatNhan', name: 'LuatNhan.txt', label: 'Luật nhân (LuatNhan)' },
+                      { id: 'PhienAm', name: 'PhienAm.txt', label: 'Phiên âm (PhienAm)' },
+                    ].map((item) => (
+                      <div key={item.id} className="bg-slate-950 border border-slate-800 p-3 rounded-xl flex items-center justify-between">
+                        <div>
+                          <div className="font-bold text-slate-200">{item.label}</div>
+                          <div className="text-[10px] text-slate-500 font-mono mt-0.5">{item.name}</div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleExportTxt(item.id)}
+                            className="p-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700"
+                            title={`Tải tệp ${item.name}`}
+                          >
+                            <Upload size={13} className="rotate-180 text-emerald-400" />
+                          </button>
+                          <button
+                            onClick={() => handleClearCategory(item.id, item.label)}
+                            className="p-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-rose-400 rounded border border-slate-700"
+                            title={`Xóa dữ liệu ${item.label}`}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Dictionary Search */}
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    Tra cứu Từ điển ({stats.total.toLocaleString('vi-VN')} từ trong kho)
                   </h3>
                   <div className="flex flex-col sm:flex-row gap-3">
                     <select
@@ -496,6 +1243,7 @@ export default function App() {
                       className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none"
                     >
                       <option value="">Tất cả danh mục</option>
+                      <option value="AiDict">✨ Từ điển AI (AiExtracted.txt)</option>
                       <option value="VietPhrase">VietPhrase</option>
                       <option value="Name">Name</option>
                       <option value="Pronouns">Pronouns</option>
@@ -533,7 +1281,7 @@ export default function App() {
                             <tr key={idx} className="hover:bg-slate-800/40">
                               <td className="p-3 font-semibold text-emerald-400">{entry.zh}</td>
                               <td className="p-3">{entry.vi}</td>
-                              <td className="p-3 text-slate-500">{entry.cat}</td>
+                              <td className="p-3 font-mono text-[11px] text-amber-400/90">{entry.cat}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -656,6 +1404,175 @@ export default function App() {
                 className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg text-xs font-semibold transition-colors"
               >
                 Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Trích xuất Từ điển từ bản dịch AI */}
+      {isExtractModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/40">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                  <Sparkles className="text-amber-400" size={20} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Trích xuất Từ điển từ Bản Dịch AI</h3>
+                  <p className="text-xs text-slate-400">Gemini AI tự động phát hiện tên riêng & cụm từ mượt để lưu vào bộ từ điển</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsExtractModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 overflow-y-auto flex-1 text-xs">
+              {/* Danh mục cần lưu */}
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800">
+                <label className="font-bold text-slate-200 text-xs flex items-center gap-2">
+                  <span>Danh mục lưu từ điển:</span>
+                </label>
+                <select
+                  value={extractedCategory}
+                  onChange={(e) => setExtractedCategory(e.target.value as any)}
+                  className="bg-slate-900 border border-slate-700 text-amber-300 font-bold px-3 py-1.5 rounded-lg text-xs outline-none focus:border-amber-500"
+                >
+                  <option value="AiDict">✨ Từ Điển AI (Lưu riêng tệp AiExtracted.txt)</option>
+                  <option value="VietPhrase">VietPhrase (Cụm từ chung - VietPhrase.txt)</option>
+                  <option value="Name">Name (Tên riêng nhân vật / Địa danh - Name.txt)</option>
+                  <option value="Pronouns">Pronouns (Đại từ xưng hô - Pronouns.txt)</option>
+                  <option value="LuatNhan">LuatNhan (Luật nhân xưng hô - LuatNhan.txt)</option>
+                </select>
+              </div>
+
+              {/* Trạng thái / Lời nhắn */}
+              {extractStatus && (
+                <div className={`p-3 rounded-lg text-xs font-medium border flex items-center gap-2 ${
+                  isExtracting 
+                    ? 'bg-amber-950/30 border-amber-800/50 text-amber-300' 
+                    : 'bg-slate-950 border-slate-800 text-emerald-400'
+                }`}>
+                  {isExtracting && <Loader2 size={16} className="animate-spin text-amber-400 shrink-0" />}
+                  <span>{extractStatus}</span>
+                </div>
+              )}
+
+              {/* Bảng danh sách từ vựng trích xuất */}
+              {!isExtracting && extractedPairs.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-slate-400 text-xs font-semibold px-1">
+                    <span>Danh sách {extractedPairs.length} từ vựng đề xuất:</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setExtractedPairs(prev => prev.map(p => ({ ...p, checked: true })))}
+                        className="text-amber-400 hover:underline text-[11px]"
+                      >
+                        Chọn tất cả
+                      </button>
+                      <span className="text-slate-600">|</span>
+                      <button
+                        onClick={() => setExtractedPairs(prev => prev.map(p => ({ ...p, checked: false })))}
+                        className="text-slate-400 hover:underline text-[11px]"
+                      >
+                        Bỏ chọn tất cả
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="border border-slate-800 rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-950 text-slate-400 font-semibold uppercase tracking-wider sticky top-0 border-b border-slate-800">
+                        <tr>
+                          <th className="p-3 w-10 text-center">Lưu</th>
+                          <th className="p-3">Từ tiếng Trung (ZH)</th>
+                          <th className="p-3">Bản dịch tiếng Việt (VI)</th>
+                          <th className="p-3 w-12 text-center">Xóa</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60 text-slate-300 bg-slate-900/40">
+                        {extractedPairs.map((pair, idx) => (
+                          <tr key={idx} className="hover:bg-slate-800/40">
+                            <td className="p-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={pair.checked}
+                                onChange={(e) => {
+                                  const updated = [...extractedPairs];
+                                  updated[idx].checked = e.target.checked;
+                                  setExtractedPairs(updated);
+                                }}
+                                className="w-4 h-4 accent-amber-500 rounded cursor-pointer"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="text"
+                                value={pair.zh}
+                                onChange={(e) => {
+                                  const updated = [...extractedPairs];
+                                  updated[idx].zh = e.target.value;
+                                  setExtractedPairs(updated);
+                                }}
+                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-emerald-400 font-semibold text-xs outline-none focus:border-amber-500"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="text"
+                                value={pair.vi}
+                                onChange={(e) => {
+                                  const updated = [...extractedPairs];
+                                  updated[idx].vi = e.target.value;
+                                  setExtractedPairs(updated);
+                                }}
+                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-medium text-xs outline-none focus:border-amber-500"
+                              />
+                            </td>
+                            <td className="p-2 text-center">
+                              <button
+                                onClick={() => {
+                                  setExtractedPairs(prev => prev.filter((_, i) => i !== idx));
+                                }}
+                                className="text-slate-500 hover:text-rose-400 transition-colors p-1"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <button
+                    onClick={() => setExtractedPairs(prev => [...prev, { zh: '', vi: '', checked: true }])}
+                    className="text-xs text-amber-400 hover:text-amber-300 font-semibold flex items-center gap-1.5 py-1"
+                  >
+                    <Plus size={14} /> Thêm cặp từ thủ công
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-slate-800 bg-slate-950/60 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setIsExtractModalOpen(false)}
+                className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleSaveExtractedPairs}
+                disabled={isExtracting || extractedPairs.filter(p => p.checked).length === 0}
+                className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-xs font-bold transition-all shadow-lg shadow-amber-950/30 flex items-center gap-2"
+              >
+                <Check size={16} /> Lưu vào Bộ Từ Điển ({extractedPairs.filter(p => p.checked).length})
               </button>
             </div>
           </div>
