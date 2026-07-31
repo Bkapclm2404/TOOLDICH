@@ -1,6 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Server, Settings, Terminal, RefreshCw, Upload, Check, Copy, Link as LinkIcon, BookOpen, AlertCircle, GitBranch, GitPullRequest, HelpCircle, ExternalLink, X, Pause, Play, Square, Zap, Trash2, Sparkles, Sliders, Layers, Type, Hash, Plus, Loader2 } from 'lucide-react';
 
+const DEFAULT_FALLBACK_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.5-pro",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+  "gemini-1.5-flash-8b",
+  "gemini-2.0-pro-exp-02-05",
+  "gemini-2.0-flash-thinking-exp-01-21",
+  "gemini-2.0-flash-exp",
+  "gemini-flash-latest",
+  "gemini-pro-latest",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-flash-lite",
+  "google/gemini-2.5-flash",
+  "gpt-4o-mini",
+  "deepseek-chat"
+];
+
 export default function App() {
   // --- STATE ---
   const [apiBaseUrl, setApiBaseUrl] = useState<string>('https://muster-okay-unpaired.ngrok-free.dev');
@@ -66,6 +88,7 @@ export default function App() {
   const [selectedModelInput, setSelectedModelInput] = useState<string>('gemini-flash-latest');
   const [providerTypeInput, setProviderTypeInput] = useState<string>('gemini');
   const [proxyUrlInput, setProxyUrlInput] = useState<string>('');
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [isSavingAiConfig, setIsSavingAiConfig] = useState(false);
   const [aiConfigMessage, setAiConfigMessage] = useState<string | null>(null);
 
@@ -175,6 +198,9 @@ export default function App() {
         setSelectedModelInput(data.activeModel || 'gemini-flash-latest');
         if (data.providerType) setProviderTypeInput(data.providerType);
         setProxyUrlInput(data.proxyUrl || '');
+        if (Array.isArray(data.availableModels)) {
+          setAvailableModels(data.availableModels);
+        }
       }
     } catch (err) {
       console.error(err);
@@ -205,6 +231,9 @@ export default function App() {
         setHasAiApiKey(data.hasApiKey);
         setAiProxyUrl(data.proxyUrl);
         if (typeof data.appVersion === 'number') setAppVersion(data.appVersion);
+        if (Array.isArray(data.availableModels)) {
+          setAvailableModels(data.availableModels);
+        }
         setAiConfigMessage("Đã lưu cấu hình AI máy chủ thành công!");
         fetchStats();
       } else {
@@ -746,23 +775,36 @@ export default function App() {
                 {/* Chọn / Nhập Model AI */}
                 <div>
                   <label className="text-slate-400 font-semibold block mb-1">Tên Model AI:</label>
-                  <input
-                    type="text"
-                    list="ai-model-list"
-                    value={selectedModelInput}
-                    onChange={(e) => setSelectedModelInput(e.target.value)}
-                    placeholder="Ví dụ: gemini-flash-latest, google/gemini-2.5-flash, deepseek-chat..."
-                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-slate-200 font-mono text-xs outline-none focus:border-amber-500"
-                  />
-                  <datalist id="ai-model-list">
-                    <option value="gemini-flash-latest" />
-                    <option value="gemini-2.5-flash" />
-                    <option value="gemini-3.1-pro-preview" />
-                    <option value="gemini-3.1-flash-lite" />
-                    <option value="google/gemini-2.5-flash" />
-                    <option value="gpt-4o-mini" />
-                    <option value="deepseek-chat" />
-                  </datalist>
+                  <select
+                    value={(availableModels.length > 0 ? availableModels : DEFAULT_FALLBACK_MODELS).includes(selectedModelInput) ? selectedModelInput : "__custom__"}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "__custom__") {
+                        setSelectedModelInput("");
+                      } else {
+                        setSelectedModelInput(val);
+                      }
+                    }}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-amber-300 font-bold outline-none focus:border-amber-500 mb-2 font-mono text-xs"
+                  >
+                    {(availableModels.length > 0 ? availableModels : DEFAULT_FALLBACK_MODELS).map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                    <option value="__custom__">✍️ Nhập model khác (tự gõ)...</option>
+                  </select>
+
+                  {/* Hiển thị ô nhập tay khi người dùng muốn gõ model tùy chỉnh hoặc chưa khớp với danh sách */}
+                  {(! (availableModels.length > 0 ? availableModels : DEFAULT_FALLBACK_MODELS).includes(selectedModelInput) || selectedModelInput === "") && (
+                    <input
+                      type="text"
+                      value={selectedModelInput}
+                      onChange={(e) => setSelectedModelInput(e.target.value)}
+                      placeholder="Nhập tên model tùy ý khác (VD: deepseek-reasoner...)"
+                      className="w-full bg-slate-900 border border-amber-500/50 rounded-md px-2.5 py-1.5 text-slate-200 font-mono text-xs outline-none focus:border-amber-500"
+                    />
+                  )}
                 </div>
 
                 {/* Máy Chủ Proxy AI Trung Gian */}

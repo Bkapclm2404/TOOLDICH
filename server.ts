@@ -225,19 +225,6 @@ KHÔNG thêm bất kỳ văn bản giải thích hay thẻ code block nào ngoà
   }
 }
 
-// Hàm chuẩn hóa danh mục sang tiền tố AI
-function toAiCategory(cat: string): DictCategory {
-  if (!cat) return 'AiDict';
-  if (cat.startsWith('Ai')) return cat as DictCategory;
-  if (cat === 'VietPhrase') return 'AiVietPhrase';
-  if (cat === 'Name') return 'AiName';
-  if (cat === 'Pronouns') return 'AiPronouns';
-  if (cat === 'LuatNhan') return 'AiLuatNhan';
-  if (cat === 'PhienAm') return 'AiPhienAm';
-  if (cat === 'Extracted') return 'AiDict';
-  return `Ai${cat}` as DictCategory;
-}
-
 // Hàm trích xuất nhanh bằng thuật toán từ điển (không dùng AI, tức thì)
 function extractDictionaryFast(sourceText: string): Array<{ zh: string; vi: string; cat: DictCategory }> {
   const pairs: Array<{ zh: string; vi: string; cat: DictCategory }> = [];
@@ -268,23 +255,19 @@ function extractDictionaryFast(sourceText: string): Array<{ zh: string; vi: stri
       }
 
       if (foundEntry && !seen.has(foundEntry.zh)) {
-        // Chỉ trích xuất từ vựng từ tệp từ điển gốc nếu độ dài >= 2 hoặc nếu đó là Tên riêng / Đại từ
-        const isNameOrPronoun = foundEntry.cat === 'Name' || foundEntry.cat === 'AiName' || foundEntry.cat === 'Pronouns' || foundEntry.cat === 'AiPronouns';
-        if (foundEntry.zh.length >= 2 || isNameOrPronoun) {
-          seen.add(foundEntry.zh);
-          let targetCat: DictCategory = 'AiDict';
-          if (foundEntry.cat === 'Name' || foundEntry.cat === 'AiName') targetCat = 'AiName';
-          else if (foundEntry.cat === 'Pronouns' || foundEntry.cat === 'AiPronouns') targetCat = 'AiPronouns';
-          else if (foundEntry.cat === 'LuatNhan' || foundEntry.cat === 'AiLuatNhan') targetCat = 'AiLuatNhan';
-          else if (foundEntry.cat === 'VietPhrase' || foundEntry.cat === 'AiVietPhrase') targetCat = 'AiVietPhrase';
-          else if (foundEntry.cat === 'PhienAm' || foundEntry.cat === 'AiPhienAm') targetCat = 'AiPhienAm';
+        seen.add(foundEntry.zh);
+        let targetCat: DictCategory = 'AiDict';
+        if (foundEntry.cat === 'Name' || foundEntry.cat === 'AiName') targetCat = 'AiName';
+        else if (foundEntry.cat === 'Pronouns' || foundEntry.cat === 'AiPronouns') targetCat = 'AiPronouns';
+        else if (foundEntry.cat === 'LuatNhan' || foundEntry.cat === 'AiLuatNhan') targetCat = 'AiLuatNhan';
+        else if (foundEntry.cat === 'VietPhrase' || foundEntry.cat === 'AiVietPhrase') targetCat = 'AiVietPhrase';
+        else if (foundEntry.cat === 'PhienAm' || foundEntry.cat === 'AiPhienAm') targetCat = 'AiPhienAm';
 
-          pairs.push({
-            zh: foundEntry.zh,
-            vi: foundEntry.vi,
-            cat: targetCat
-          });
-        }
+        pairs.push({
+          zh: foundEntry.zh,
+          vi: foundEntry.vi,
+          cat: targetCat
+        });
         i += subLen;
         matched = true;
         break;
@@ -292,18 +275,14 @@ function extractDictionaryFast(sourceText: string): Array<{ zh: string; vi: stri
     }
 
     if (!matched) {
-      // Chỉ trích xuất phiên âm đơn tự nếu đó là đại từ nhân xưng
       const phienAm = phienAmMapStandard.get(char) || phienAmMapAi.get(char);
       if (phienAm && !seen.has(char)) {
-        const isPronounChar = char === '我' || char === '你' || char === '他' || char === '她' || char === '它' || char === '们';
-        if (isPronounChar) {
-          seen.add(char);
-          pairs.push({
-            zh: char,
-            vi: phienAm,
-            cat: 'AiPronouns'
-          });
-        }
+        seen.add(char);
+        pairs.push({
+          zh: char,
+          vi: phienAm,
+          cat: 'AiPhienAm'
+        });
       }
       i++;
     }
@@ -337,6 +316,42 @@ const DICT_DIR = path.join(process.cwd(), "dictionaries");
 if (!fs.existsSync(DICT_DIR)) {
   fs.mkdirSync(DICT_DIR, { recursive: true });
 }
+
+// Tệp cấu hình AI cố định
+const AI_CONFIG_FILE = path.join(DICT_DIR, "ai_config.json");
+
+function loadAiConfig() {
+  try {
+    if (fs.existsSync(AI_CONFIG_FILE)) {
+      const data = JSON.parse(fs.readFileSync(AI_CONFIG_FILE, "utf8"));
+      if (typeof data.activeModel === "string") currentAiModel = data.activeModel;
+      if (typeof data.providerType === "string") aiProviderType = data.providerType;
+      if (typeof data.customApiKey === "string") customApiKey = data.customApiKey;
+      if (typeof data.aiProxyUrl === "string") aiProxyUrl = data.aiProxyUrl;
+      console.log(`[Cấu hình AI] Đã nạp từ file: Model=${currentAiModel}, Provider=${aiProviderType}, Proxy=${aiProxyUrl}`);
+    }
+  } catch (err) {
+    console.error("Lỗi khi nạp cấu hình AI:", err);
+  }
+}
+
+function saveAiConfig() {
+  try {
+    const data = {
+      activeModel: currentAiModel,
+      providerType: aiProviderType,
+      customApiKey,
+      aiProxyUrl
+    };
+    fs.writeFileSync(AI_CONFIG_FILE, JSON.stringify(data, null, 2), "utf8");
+    console.log(`[Cấu hình AI] Đã lưu xuống file: Model=${currentAiModel}, Provider=${aiProviderType}, Proxy=${aiProxyUrl}`);
+  } catch (err) {
+    console.error("Lỗi khi lưu cấu hình AI:", err);
+  }
+}
+
+// Nạp cấu hình AI từ đĩa ngay lập tức
+loadAiConfig();
 
 // Mảng được sắp xếp và Map tra cứu nhanh riêng biệt cho từng chế độ dịch (Standard, AI)
 let sortedDictList: ServerDictEntry[] = [];
@@ -643,8 +658,8 @@ function translateSegment(
       let entry: { vi: string; catPriority: number } | undefined = undefined;
 
       if (dictMode === 'ai') {
-        // Ưu tiên tra cứu trong Từ Điển AI, nếu không có thì fallback sang Từ Điển Gốc (Standard)
-        entry = dictLookupMapAi.get(sub) || dictLookupMapStandard.get(sub);
+        // Chỉ tra cứu trong Từ Điển AI, tuyệt đối không dùng từ điển Gốc bổ sung dự phòng
+        entry = dictLookupMapAi.get(sub);
       } else {
         // Chỉ tra cứu trong Từ Điển Gốc, tuyệt đối không dùng từ điển AI
         entry = dictLookupMapStandard.get(sub);
@@ -664,7 +679,8 @@ function translateSegment(
       let phienAm: string | undefined = undefined;
 
       if (dictMode === 'ai') {
-        phienAm = phienAmMapAi.get(char) || phienAmMapStandard.get(char);
+        // Chỉ dùng phiên âm từ Từ Điển AI, tuyệt đối không dùng từ điển Gốc bổ sung dự phòng
+        phienAm = phienAmMapAi.get(char);
       } else {
         phienAm = phienAmMapStandard.get(char);
       }
@@ -750,26 +766,124 @@ async function startServer() {
     });
   });
 
+  // Hàm lấy danh sách model động từ máy chủ trung gian
+  async function fetchModelsFromProxy(proxyUrl: string, apiKey: string, provider: string): Promise<string[]> {
+    const defaultModels = [
+      "gemini-3.5-flash",
+      "gemini-3.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
+      "gemini-2.0-flash",
+      "gemini-2.0-flash-lite",
+      "gemini-1.5-flash",
+      "gemini-1.5-pro",
+      "gemini-1.5-flash-8b",
+      "gemini-2.0-pro-exp-02-05",
+      "gemini-2.0-flash-thinking-exp-01-21",
+      "gemini-2.0-flash-exp",
+      "gemini-flash-latest",
+      "gemini-pro-latest",
+      "gemini-3.1-pro-preview",
+      "gemini-3.1-flash-lite",
+      "google/gemini-2.5-flash",
+      "gpt-4o-mini",
+      "deepseek-chat"
+    ];
+
+    if (!proxyUrl) {
+      return defaultModels;
+    }
+
+    let baseUrl = proxyUrl.replace(/\/chat\/completions\/?$/, '').replace(/\/+$/, '');
+    const isOpenAiLike = provider === "openai" || proxyUrl.includes("/v1") || proxyUrl.includes("openrouter") || proxyUrl.includes("openai");
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2500); // 2.5s timeout
+
+    try {
+      const headers: Record<string, string> = {
+        "Accept": "application/json"
+      };
+      const key = apiKey || process.env.GEMINI_API_KEY || "";
+      if (key) {
+        if (isOpenAiLike) {
+          headers["Authorization"] = `Bearer ${key}`;
+        } else {
+          headers["x-goog-api-key"] = key;
+        }
+      }
+
+      let url = `${baseUrl}/models`;
+      if (!isOpenAiLike && key && !url.includes("key=")) {
+        url += `?key=${key}`;
+      }
+
+      const response = await fetch(url, {
+        headers,
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        console.warn(`Fetch models failed with status ${response.status} for URL ${url}`);
+        return defaultModels;
+      }
+
+      const json: any = await response.json();
+      let modelIds: string[] = [];
+
+      if (json && Array.isArray(json.data)) {
+        modelIds = json.data
+          .map((m: any) => m && (typeof m === 'string' ? m : m.id || m.name))
+          .filter((m: string) => typeof m === 'string' && m);
+      } else if (json && Array.isArray(json.models)) {
+        modelIds = json.models
+          .map((m: any) => {
+            if (!m) return null;
+            const name = typeof m === 'string' ? m : m.name;
+            if (typeof name === 'string') {
+              return name.startsWith("models/") ? name.replace("models/", "") : name;
+            }
+            return null;
+          })
+          .filter((m: string | null) => typeof m === 'string' && m) as string[];
+      } else if (Array.isArray(json)) {
+        modelIds = json
+          .map((m: any) => m && (typeof m === 'string' ? m : m.id || m.name))
+          .filter((m: string) => typeof m === 'string' && m);
+      }
+
+      if (modelIds.length > 0) {
+        const uniqueModels = Array.from(new Set([...modelIds, ...defaultModels]));
+        return uniqueModels;
+      }
+
+      return defaultModels;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      console.error("Lỗi khi fetch danh sách model từ máy chủ trung gian:", err);
+      return defaultModels;
+    }
+  }
+
   // Endpoint lấy và cập nhật cấu hình AI (Model, Proxy, Custom Key, Provider Type)
-  app.get("/api/ai/config", (req, res) => {
-    res.json({
-      activeModel: currentAiModel,
-      providerType: aiProviderType,
-      hasApiKey: !!(customApiKey.trim() || process.env.GEMINI_API_KEY),
-      proxyUrl: aiProxyUrl,
-      availableModels: [
-        "gemini-flash-latest",
-        "gemini-2.5-flash",
-        "gemini-3.1-pro-preview",
-        "gemini-3.1-flash-lite",
-        "google/gemini-2.5-flash",
-        "gpt-4o-mini",
-        "deepseek-chat"
-      ]
-    });
+  app.get("/api/ai/config", async (req, res) => {
+    try {
+      const models = await fetchModelsFromProxy(aiProxyUrl, customApiKey, aiProviderType);
+      res.json({
+        activeModel: currentAiModel,
+        providerType: aiProviderType,
+        hasApiKey: !!(customApiKey.trim() || process.env.GEMINI_API_KEY),
+        proxyUrl: aiProxyUrl,
+        availableModels: models
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
-  app.post("/api/ai/config", (req, res) => {
+  app.post("/api/ai/config", async (req, res) => {
     try {
       const { activeModel, customKey, proxyUrl, providerType } = req.body;
       if (typeof activeModel === 'string' && activeModel.trim()) {
@@ -785,15 +899,21 @@ async function startServer() {
         aiProxyUrl = proxyUrl.trim();
       }
 
+      // Lưu xuống tệp cấu hình để giữ an toàn sau mỗi lần cập nhật hoặc máy chủ khởi động lại
+      saveAiConfig();
+
       incrementVersion();
+
+      const models = await fetchModelsFromProxy(aiProxyUrl, customApiKey, aiProviderType);
 
       res.json({
         success: true,
-        message: "Cập nhật cấu hình AI máy chủ thành công!",
+        message: "Cập nhật cấu hình AI máy chủ thành công và đã lưu vĩnh viễn!",
         activeModel: currentAiModel,
         providerType: aiProviderType,
         hasApiKey: !!(customApiKey.trim() || process.env.GEMINI_API_KEY),
         proxyUrl: aiProxyUrl,
+        availableModels: models,
         appVersion
       });
     } catch (err: any) {
@@ -936,6 +1056,19 @@ async function startServer() {
       res.status(500).json({ error: err.message || "Lỗi khi trích xuất nhanh." });
     }
   });
+
+  // Hàm chuẩn hóa danh mục sang tiền tố AI
+  function toAiCategory(cat: string): DictCategory {
+    if (!cat) return 'AiDict';
+    if (cat.startsWith('Ai')) return cat as DictCategory;
+    if (cat === 'VietPhrase') return 'AiVietPhrase';
+    if (cat === 'Name') return 'AiName';
+    if (cat === 'Pronouns') return 'AiPronouns';
+    if (cat === 'LuatNhan') return 'AiLuatNhan';
+    if (cat === 'PhienAm') return 'AiPhienAm';
+    if (cat === 'Extracted') return 'AiDict';
+    return `Ai${cat}` as DictCategory;
+  }
 
   // Endpoint thêm hàng loạt cặp từ mới vào danh mục từ điển máy chủ
   app.post("/api/dictionary/add-entries", (req, res) => {
